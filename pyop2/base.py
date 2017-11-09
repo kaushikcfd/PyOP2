@@ -2728,6 +2728,8 @@ class Map(object):
 
     _globalcount = 0
 
+    dtype = IntType
+
     @validate_type(('iterset', Set, SetTypeError), ('toset', Set, SetTypeError),
                    ('arity', numbers.Integral, ArityTypeError), ('name', str, NameTypeError))
     def __init__(self, iterset, toset, arity, values=None, name=None, offset=None, parent=None, boundary_masks=None):
@@ -2738,6 +2740,7 @@ class Map(object):
         self._values = verify_reshape(values, IntType,
                                       (iterset.total_size, arity),
                                       allow_none=True)
+        self.shape = (iterset.total_size, arity)
         self._name = name or "map_%d" % Map._globalcount
         if offset is None or len(offset) == 0:
             self._offset = None
