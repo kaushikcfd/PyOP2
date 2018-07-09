@@ -71,6 +71,7 @@ class PetscCallable(loopy.ScalarCallable):
                     dim_tags=dim_tags
                 )
 
+
         return self.copy(arg_id_to_descr=new_arg_id_to_descr)
 
 
@@ -83,70 +84,7 @@ def petsc_function_lookup(target, identifier):
     return None
 
 
-# PyOP2 Kernel passed in as string
-class PyOP2KernelCallable(loopy.ScalarCallable):
 
-    def with_types(self, arg_id_to_dtype, kernel):
-        new_arg_id_to_dtype = arg_id_to_dtype.copy()
-        return self.copy(
-            name_in_target=self.name,
-            arg_id_to_dtype=new_arg_id_to_dtype
-        )
-
-    def with_descrs(self, arg_id_to_descr):
-        from loopy.kernel.function_interface import ArrayArgDescriptor
-        from loopy.kernel.array import FixedStrideArrayDimTag
-        new_arg_id_to_descr = arg_id_to_descr.copy()
-        for i, des in arg_id_to_descr.items():
-            # FIXME: assume 1D arrays as arguments for now
-            if isinstance(des, ArrayArgDescriptor):
-                dim_tags = tuple(
-                    FixedStrideArrayDimTag(
-                        stride=int(numpy.prod(des.shape[i+1:])),
-                        layout_nesting_level=len(des.shape)-i-1
-                    )
-                    for i in range(len(des.shape))
-                )
-                new_arg_id_to_descr[i] = ArrayArgDescriptor(
-                    shape=des.shape,
-                    mem_scope=des.mem_scope,
-                    dim_tags=dim_tags
-                )
-
-        return self.copy(arg_id_to_descr=new_arg_id_to_descr)
-
-    def emit_call_insn(self, insn, target, expression_to_code_mapper):
-        # f(a,b,c,d) instead of a = f(b,c,d)
-
-        from loopy.kernel.instruction import CallInstruction
-
-        assert self.is_ready_for_codegen()
-        assert isinstance(insn, CallInstruction)
-
-        parameters = insn.assignees + insn.expression.parameters
-        par_dtypes = tuple(expression_to_code_mapper.infer_type(p) for p in parameters)
-        # par_dtype.extend([self.arg_id_to_dtype[i] for i, _ in enumerate(insn.expression.p)])
-
-        from loopy.expression import dtype_to_type_context
-        from pymbolic.mapper.stringifier import PREC_NONE
-        from pymbolic import var
-
-        c_parameters = [
-                expression_to_code_mapper(
-                    par, PREC_NONE, dtype_to_type_context(target, par_dtype), par_dtype
-                ).expr
-            for par, par_dtype in zip(parameters, par_dtypes)]
-
-        assignee_is_returned = False
-        return var(self.name_in_target)(*c_parameters), assignee_is_returned
-
-def pyop2_kernel_lookup(target, identifier):
-    if identifier in ["inject_kernel", "prolong_kernel", "restrict_kernel", "evaluate_kernel",
-                      "injection_dg", "uniform_extrusion_kernel", "radial_extrusion_kernel",
-                      "radial_hedgehog_extrusion_kernel", "pyop2_kernel"]:
-        return PyOP2KernelCallable(name=identifier)
-    assert False
-    return None
 
 # def petsc_function_mangler(kernel, name, arg_dtypes):
 #     if name == "CHKERRQ":
@@ -244,8 +182,7 @@ def instruction_dependencies(instructions, initialisers):
             lvalue, _ = op.children
             # Only writes to the outer-most variable
             writes = next(variables([lvalue]))
-            if isinstance(writes, Variable):
-                writers[writes].append(name)
+            writers[writes].append(name)
             names[op] = name
         else:
             assert isinstance(op, FunctionCall)
@@ -254,8 +191,7 @@ def instruction_dependencies(instructions, initialisers):
             for access, arg in zip(op.access, op.children):
                 if access is not READ:
                     writes = next(variables([arg]))
-                    if isinstance(writes, Variable):
-                        writers[writes].append(name)
+                    writers[writes].append(name)
 
     for op, name in names.items():
         if isinstance(op, Accumulate):
@@ -379,30 +315,19 @@ def generate(builder):
 
     kernel = builder.kernel
     alignment = 64
-    headers = set(kernel._headers)
-    headers = headers | set(["#include <petsc.h>", "#include <math.h>"])
-    preamble = "\n".join(sorted(headers))
-    # , "#include <Eigen/Dense>"
 
-    if isinstance(kernel._code, loopy.LoopKernel):
-        # register kernel
-        knl = kernel._code
-        wrapper = loopy.register_callable_kernel(wrapper, knl.name, knl)
-        # from loopy.transform.register_callable import _match_caller_callee_argument_dimension
-        # wrapper = _match_caller_callee_argument_dimension(wrapper, kernel.name)
-        wrapper = loopy.inline_callable_kernel(wrapper, knl.name)
-        scoped_functions = wrapper.scoped_functions.copy()
-        scoped_functions.update(knl.scoped_functions)
-        wrapper = wrapper.copy(scoped_functions=scoped_functions)
-    else:
-        # kernel is a string
-        wrapper = loopy.register_function_lookup(wrapper, pyop2_kernel_lookup)
-        preamble = preamble + "\n" + kernel._code
-
+    # register kernel
+    wrapper = loopy.register_callable_kernel(wrapper, kernel.name, kernel)
+    # from loopy.transform.register_callable import _match_caller_callee_argument_dimension
+    # wrapper = _match_caller_callee_argument_dimension(wrapper, kernel.name)
+    wrapper = loopy.inline_callable_kernel(wrapper, kernel.name)
     # register petsc functions
     wrapper = loopy.register_function_lookup(wrapper, petsc_function_lookup)
 
     # wrapper = loopy.inline_kernel(wrapper, kernel.name)
+    scoped_functions = wrapper.scoped_functions.copy()
+    scoped_functions.update(kernel.scoped_functions)
+    wrapper = wrapper.copy(scoped_functions=scoped_functions)
 
     if builder.batch > 1:
         if builder.extruded:
@@ -437,7 +362,9 @@ def generate(builder):
         # kernel = loopy.tag_inames(kernel, {"elem": "ilp.seq"})
     for name in wrapper.temporary_variables:
         tv = wrapper.temporary_variables[name]
-        wrapper.temporary_variables[name] = tv.copy(alignment=alignment)
+        use_opencl = 1
+        if not use_opencl:
+            wrapper.temporary_variables[name] = tv.copy(alignment=alignment)
 
     # mark inner most loop as omp simd
     # import os
@@ -458,7 +385,12 @@ def generate(builder):
     #     for iname in innermost_iname:
     #         kernel = loopy.tag_inames(kernel, {iname: "l.0"})
 
-    wrapper = wrapper.copy(preambles=[("0", preamble)])
+    use_opencl = 1
+
+    if not use_opencl:
+        preamble = "#include <petsc.h>\n"
+        preamble = "#include <math.h>\n" + preamble
+        wrapper = wrapper.copy(preambles=[("0", preamble)])
 
     # vectorization }}}
 
@@ -500,8 +432,9 @@ def prepare_arglist(iterset, *args):
                 seen.add(k)
     return arglist
 
+
 def set_argtypes(iterset, *args):
-    from pyop2.datatypes import IntType, as_cstr, as_ctypes
+    from pyop2.datatypes import IntType, as_ctypes
     index_type = as_ctypes(IntType)
     argtypes = (index_type, index_type)
     argtypes += iterset._argtypes_
@@ -537,6 +470,138 @@ def prepare_cache_key(kernel, iterset, *args):
     return key
 
 
+def get_grid_sizes(kernel):
+    parameters = {}
+    for arg in kernel.args:
+        if isinstance(arg, loopy.ValueArg) and arg.approximately is not None:
+            parameters[arg.name] = arg.approximately
+
+    glens, llens = kernel.get_grid_size_upper_bounds_as_exprs()
+
+    from pymbolic import evaluate
+    from pymbolic.mapper.evaluator import UnknownVariableError
+    try:
+        glens = evaluate(glens, parameters)
+        llens = evaluate(llens, parameters)
+    except UnknownVariableError as name:
+        from warnings import warn
+        warn("could not check axis bounds because no value "
+                "for variable '%s' was passed to check_kernels()"
+                % name)
+
+    return llens, glens
+
+
+def generate_viennacl_code(kernel):
+    import pyopencl as cl
+    import re
+    from mako.template import Template
+    lsize, gsize = get_grid_sizes(kernel)
+    if not lsize:
+        lsize = (1, )
+    if not gsize:
+        gsize = (1, )
+    ctx = cl.create_some_context()
+    # TODO: somehow pull the device from the petsc vec
+    kernel = kernel.copy(
+            target=loopy.PyOpenCLTarget(ctx.devices[0]))
+
+    c_code_str = r'''#include <CL/cl.h>
+            #include "petsc.h"
+            #include "petscvec.h"
+            #include "petscviennacl.h"
+            #include <iostream>
+            <%! import loopy as lp %>
+
+            // ViennaCL Headers
+            #include "viennacl/ocl/backend.hpp"
+            #include "viennacl/vector.hpp"
+            #include "viennacl/backend/memory.hpp"
+
+            char kernel_source[] = "${kernel_src}";
+
+            extern "C" void ${kernel_name}(${", ".join(
+                                [('Vec ' + arg.name)  if isinstance(arg,
+                                lp.ArrayArg) and not arg.dtype.is_integral() else
+                                ('int const* ' + arg.name) if isinstance(arg,
+                                lp.ArrayArg) and arg.dtype.is_integral() else
+                                str(arg.get_arg_decl(ast_builder))[:-1]
+                                for arg in args])})
+            {
+                // viennacl vector declarations
+                % for arg in args:
+                % if isinstance(arg, lp.ArrayArg) and not arg.dtype.is_integral():
+                viennacl::vector<PetscScalar> *${arg.name}_viennacl;
+                % endif
+                % endfor
+
+                // getting the array from the petsc vecs
+                % for arg in args:
+                % if isinstance(arg, lp.ArrayArg) and not arg.dtype.is_integral():
+                VecViennaCLGetArrayReadWrite(${arg.name}, &${arg.name}_viennacl);
+                % endif
+                % endfor
+
+                // defining the context
+                viennacl::ocl::context ctx =
+                        ${[arg for arg in args if isinstance(arg,
+                        lp.ArrayArg) and not
+                        arg.dtype.is_integral()][0].name}_viennacl->handle().opencl_handle().context();
+
+                // declaring the int arrays(if any..)
+                % for arg in args:
+                % if isinstance(arg, lp.ArrayArg) and arg.dtype.is_integral():
+                viennacl::vector<cl_int> ${arg.name}_viennacl(3*(end-start), ctx);
+                copy(${arg.name}, &(${arg.name}[3*(end-start)]), ${arg.name}_viennacl.begin());
+                % endif
+                % endfor
+
+                viennacl::ocl::program & my_prog =
+                            ctx.add_program(kernel_source, "kernel_program");
+                viennacl::ocl::kernel &viennacl_kernel =
+                        my_prog.get_kernel("${kernel_name}");
+
+                // set work group sizes
+                % for i, ls in enumerate(lsize):
+                viennacl_kernel.local_work_size(${i}, ${ls});
+                % endfor
+                % for i, gs in enumerate(gsize):
+                viennacl_kernel.global_work_size(${i}, ${gs});
+                % endfor
+
+                // enqueueing the kernel
+                viennacl::ocl::enqueue(viennacl_kernel(${", ". join(
+                                ['*' + arg.name + '_viennacl' if
+                                isinstance(arg, lp.ArrayArg) and not
+                                arg.dtype.is_integral() else arg.name + '_viennacl'
+                                if isinstance(arg, lp.ArrayArg) and
+                                arg.dtype.is_integral() else 'cl_int('+arg.name+')'
+                                for arg in args])}));
+
+                // restoring the arrays to the petsc vecs
+                % for arg in args:
+                % if isinstance(arg, lp.ArrayArg) and not arg.dtype.is_integral():
+                VecViennaCLRestoreArrayReadWrite(${arg.name}, &${arg.name}_viennacl);
+                %endif
+                % endfor
+
+            }
+            '''
+
+    # remove the whitespaces for pretty printing
+    c_code_str = re.sub("\\n            ", "\n", c_code_str)
+
+    c_code = Template(c_code_str)
+
+    return c_code.render(
+        kernel_src=loopy.generate_code_v2(kernel).device_code().replace('\n',
+            '\\n"\n"'),
+        kernel_name=kernel.name,
+        ast_builder=kernel.target.get_device_ast_builder(),
+        args=kernel.args,
+        lsize=lsize,
+        gsize=gsize)
+
 
 @singledispatch
 def statement(expr, context):
@@ -565,7 +630,7 @@ def statement_assign(expr, context):
     return loopy.Assignment(lvalue, rvalue, within_inames=within_inames,
                             predicates=predicates,
                             id=id,
-                            depends_on=depends_on, depends_on_is_final=True)
+                            depends_on=depends_on)
 
 
 @statement.register(FunctionCall)
@@ -611,7 +676,7 @@ def statement_functioncall(expr, context):
                                  within_inames=within_inames,
                                  predicates=predicates,
                                  id=id,
-                                 depends_on=depends_on, depends_on_is_final=True)
+                                 depends_on=depends_on)
 
 
 @singledispatch
