@@ -479,58 +479,18 @@ def transform_for_opencl(program):
         #         outer_tag="g.0")
         pass
     else:
-        new_space = kernel.domains[0].get_space()
-        pos = 1
-        for dom in kernel.domains[1:]:
-            # cartesian product of all the spaces
-            for dim_name, (dim_type, _) in dom.get_space().get_var_dict().items():
-                assert dim_type == 3
-                new_space = new_space.add_dims(dim_type, 1)
-                new_space = new_space.set_dim_name(dim_type, pos, dim_name)
-                pos += 1
-        new_domain = isl.BasicSet.universe(new_space)
-        for dom in kernel.domains[:]:
-            for constraint in dom.get_constraints():
-                new_domain = (
-                        new_domain.add_constraint(
-                            isl.Constraint.ineq_from_names(new_space,
-                                constraint.get_coefficients_by_name())))
-
-        kernel = kernel.copy(domains=[new_domain])
-
         # problem size = 32*6*32*6*2(number of cells)
         # number of vertices = (32*6+1)**2
 
         # For now hardcoding  the values in order to check the transformation
+
+        # {{{ init phase, which should be pulled form the for   m
+
         nquad = 3
         nbasis = 6
         ncells_per_threadblock = np.lcm(nquad, nbasis)
         nthreadblocks_per_chunk = 32  # multiple of 32 in order to avoid 1/2 warps
         kernel = loopy.assume(kernel, "start = 0 and end = (192*192*2)")
-
-        kernel = loopy.split_iname(kernel, "n",
-                int(nthreadblocks_per_chunk * ncells_per_threadblock),
-                outer_iname="ichunk", outer_tag="g.0")
-        kernel = loopy.split_iname(kernel, "n_inner",
-                int(ncells_per_threadblock),
-                outer_iname="ithreadblock", inner_iname="icell")
-        from loopy.transform.batch import _merged_batch
-
-        # the four entries of the matrix and the determinant
-        jacobi_matrix_vars = ['form_t8', 'form_t9', 'form_t10', 'form_t11', 'form_t12']
-
-        kernel = _merged_batch(kernel, 'form_ip', [], ['form_t16', 'form_t17'],
-                within="id:form_insn_12 or id:form_insn_13 or id:form_insn_14"
-                " or id:form_insn_15 or id:form_insn_17 or id:form_insn_18")
-        kernel = _merged_batch(kernel, 'icell', [], ['t0', 't1', 't2', 'form_t16', 'form_t17'] + jacobi_matrix_vars)
-        kernel = _merged_batch(kernel, 'ithreadblock', [], ['t0', 't1', 't2', 'form_t16', 'form_t17'] + jacobi_matrix_vars)
-
-        kernel = loopy.duplicate_inames(kernel, ["form_ip"],
-                new_inames=["form_ip_quad"], within="id:form_insn_12 or id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
-        kernel = loopy.add_barrier(kernel, "id:statement2",
-                "id:form_insn", synchronization_kind='local')
-        kernel = loopy.add_barrier(kernel, "id:form_insn_15",
-                "id:form_insn_16", synchronization_kind='local')
         load_within = (
                 "id:statement0 or id:statement1 or id:statement2 or id:form__start")
         quad_within = (
@@ -541,30 +501,138 @@ def transform_for_opencl(program):
                 " or id:form_insn_12 or id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
         basis_within = "not (" + quad_within + " or " + load_within + ")"
 
-        kernel = loopy.join_inames(kernel, ["ithreadblock", "icell"],
+        # }}}
+
+        # {{{ realizing threadblocks and local cells
+
+        kernel = loopy.split_iname(kernel, "n",
+                int(nthreadblocks_per_chunk * ncells_per_threadblock),
+                outer_iname="ichunk")
+        kernel = loopy.split_iname(kernel, "n_inner",
+                int(ncells_per_threadblock), outer_iname="ithreadblock",
+                inner_iname="icell")
+
+        # }}}
+
+        # {{{ storing copies in the loops (DE-LICMing)
+
+        from loopy.transform.batch import _merged_batch
+
+        # the four entries of the matrix and the determinant
+        jacobi_matrix_vars = ['form_t8', 'form_t9', 'form_t10', 'form_t11',
+                'form_t12']
+
+        # the variables storing the values at the quadrature
+        kernel = _merged_batch(kernel, 'form_ip', [], ['form_t16', 'form_t17'],
+                within="id:form_insn_12 or id:form_insn_13 or id:form_insn_14"
+                " or id:form_insn_15 or id:form_insn_17 or id:form_insn_18")
+
+        kernel = _merged_batch(kernel, 'icell', [], ['t0', 't1', 't2',
+            'form_t16', 'form_t17'] + jacobi_matrix_vars)
+
+        kernel = _merged_batch(kernel, 'ithreadblock', [], ['t0', 't1', 't2',
+            'form_t16', 'form_t17'] + jacobi_matrix_vars)
+
+        # }}}
+
+        # {{{ duplicating the inames for independent parts
+
+        kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
+                new_inames=["ichunk_load", "ithreadblock_load", "icell_load"],
+                within=load_within)
+
+        kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
+                new_inames=["ichunk_quad", "ithreadblock_quad", "icell_quad"],
+                within=quad_within)
+
+        kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
+                new_inames=["ichunk_basis", "ithreadblock_basis", "icell_basis"],
+                within=basis_within)
+
+        kernel = loopy.duplicate_inames(kernel, ["form_ip"],
+                new_inames=["form_ip_quad"], within="id:form_insn_12 or"
+                " id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
+
+        kernel = loopy.remove_unused_inames(kernel)
+        assert not (frozenset(["ithreadblock", "icell", "n", "ichunk"])
+                & kernel.all_inames())
+
+        # }}}
+
+        # {{{ coalescing the entire domain forest
+
+        new_space = kernel.domains[0].get_space()
+        pos = kernel.domains[0].n_dim()
+        for dom in kernel.domains[1:]:
+            # cartesian product of all the spaces
+            for dim_name, (dim_type, _) in dom.get_space().get_var_dict().items():
+                assert dim_type == 3
+                new_space = new_space.add_dims(dim_type, 1)
+                new_space = new_space.set_dim_name(dim_type, pos, dim_name)
+                pos += 1
+
+        new_domain = isl.BasicSet.universe(new_space)
+        for dom in kernel.domains[:]:
+            for constraint in dom.get_constraints():
+                new_domain = (
+                        new_domain.add_constraint(
+                            isl.Constraint.ineq_from_names(new_space,
+                                constraint.get_coefficients_by_name())))
+
+        kernel = kernel.copy(domains=[new_domain])
+
+        # }}}
+
+        # {{{ adding barriers
+
+        kernel = loopy.add_barrier(kernel, "id:statement2",
+                "id:form_insn", synchronization_kind='local')
+        kernel = loopy.add_barrier(kernel, "id:form_insn_15",
+                "id:form_insn_16", synchronization_kind='local')
+
+        # }}}
+
+        # {{{ re-distributing the gather work
+
+        kernel = loopy.join_inames(kernel, ["ithreadblock_load", "icell_load"],
                 "local_id1", within=load_within)
 
-        kernel = loopy.split_iname(kernel, "icell", nquad,
+        # }}}
+
+        # {{{ re-distributing the quadrature evaluation work
+
+        kernel = loopy.split_iname(kernel, "icell_quad", nquad,
                 inner_iname="inner_quad_cell", outer_iname="outer_quad_cell",
                 within=quad_within)
 
-        kernel = loopy.join_inames(kernel, ["ithreadblock", "outer_quad_cell",
+        kernel = loopy.join_inames(kernel, ["ithreadblock_quad", "outer_quad_cell",
             "form_ip_quad"], "local_id2", within=quad_within)
 
-        kernel = loopy.split_iname(kernel, "icell", nbasis,
+        # }}}
+
+        # {{{ re-distributing the quadrature evaluation work
+
+        kernel = loopy.split_iname(kernel, "icell_basis", nbasis,
                 inner_iname="inner_basis_cell", outer_iname="outer_basis_cell",
                 within=basis_within)
-        kernel = loopy.join_inames(kernel, ["ithreadblock", "outer_basis_cell",
+        kernel = loopy.join_inames(kernel, ["ithreadblock_basis", "outer_basis_cell",
             "form_j"], "local_id3", within=(basis_within+" and not"
                 " id:statement3"))
-        kernel = loopy.join_inames(kernel, ["ithreadblock", "outer_basis_cell",
+        kernel = loopy.join_inames(kernel, ["ithreadblock_basis", "outer_basis_cell",
             "i8"], "local_id4", within="id:statement3")
+
+        # }}}
+        print(kernel)
+
+        # tagging inames
         kernel = loopy.tag_inames(kernel, {
-            "ichunk":    "g.0",
-            "local_id1": "l.0",
-            "local_id2": "l.0",
-            "local_id3": "l.0",
-            "local_id4": "l.0",
+            "ichunk_load":  "g.0",
+            "ichunk_quad":  "g.0",
+            "ichunk_basis": "g.0",
+            "local_id1":    "l.0",
+            "local_id2":    "l.0",
+            "local_id3":    "l.0",
+            "local_id4":    "l.0",
             })
 
         shared_vars = ['t0', 't1', 't2', 'form_t8', 'form_t9', 'form_t10',
