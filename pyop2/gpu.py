@@ -506,11 +506,11 @@ def transform_for_opencl(program):
         nbasis = 6
         ncells_per_threadblock = np.lcm(nquad, nbasis)
         nthreadblocks_per_chunk = 32  # multiple of 32 in order to avoid 1/2 warps
-        nchunks = (32*6*32*6*2)/(nthreadblocks_per_chunk * ncells_per_threadblock)  # numerator is the number of elements
-        print(kernel.arg_dict)
-        1/0
+        kernel = loopy.assume(kernel, "start = 0 and end = (192*192*2)")
 
-        kernel = loopy.split_iname(kernel, "n", int(nchunks), outer_iname="ichunk", outer_tag="g.0")
+        kernel = loopy.split_iname(kernel, "n",
+                int(nthreadblocks_per_chunk * ncells_per_threadblock),
+                outer_iname="ichunk", outer_tag="g.0")
         kernel = loopy.split_iname(kernel, "n_inner",
                 int(ncells_per_threadblock),
                 outer_iname="ithreadblock", inner_iname="icell")
@@ -557,7 +557,7 @@ def transform_for_opencl(program):
         kernel = loopy.join_inames(kernel, ["ithreadblock", "outer_basis_cell",
             "form_j"], "local_id3", within=(basis_within+" and not"
                 " id:statement3"))
-        kernel = loopy.join_inames(kernel, ["ithreadblock", "outer_quad_cell",
+        kernel = loopy.join_inames(kernel, ["ithreadblock", "outer_basis_cell",
             "i8"], "local_id4", within="id:statement3")
         kernel = loopy.tag_inames(kernel, {
             "ichunk":    "g.0",
@@ -573,14 +573,10 @@ def transform_for_opencl(program):
             tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv in shared_vars
             else (tv.name, tv) for tv in kernel.temporary_variables.values())
         kernel = kernel.copy(temporary_variables=new_temps)
-        print(kernel.arg_dict)
-
-        program = program.with_root_kernel(kernel)
-        print(loopy.generate_code_v2(program))
+        program = program.with_root_kernel(kernel).copy(
+            target=loopy.PyOpenCLTarget())
+        print(loopy.generate_code_v2(program).device_code())
         1/0
-        _LOCAL_SIZE = 64
-        kernel = loopy.split_iname(kernel, "n", _LOCAL_SIZE, inner_tag="l.0",
-                outer_tag="g.0")
 
     return program.with_root_kernel(kernel)
 
