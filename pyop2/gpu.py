@@ -573,6 +573,11 @@ def transform_for_opencl(program):
             tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv in shared_vars
             else (tv.name, tv) for tv in kernel.temporary_variables.values())
         kernel = kernel.copy(temporary_variables=new_temps)
+        no_sync_with = frozenset([(insn.id, 'local') for insn in
+            kernel.instructions])
+        new_insns = [insn.copy(no_sync_with=no_sync_with) for
+            insn in kernel.instructions]
+        kernel = kernel.copy(instructions=new_insns)
         program = program.with_root_kernel(kernel).copy(
             target=loopy.PyOpenCLTarget())
         print(loopy.generate_code_v2(program).device_code())
