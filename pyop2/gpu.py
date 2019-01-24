@@ -470,15 +470,6 @@ def transform_for_opencl(program):
             new_args.append(arg)
 
     kernel = kernel.copy(instructions=new_insns, args=new_args)
-    new_space = kernel.domains[0].get_space()
-    pos = 1
-    for dom in kernel.domains[1:]:
-        # cartesian product of all the spaces
-        for dim_name, (dim_type, _) in dom.get_space().get_var_dict().items():
-            assert dim_type == 3
-            new_space = new_space.add_dims(dim_type, 1)
-            new_space = new_space.set_dim_name(dim_type, pos, dim_name)
-            pos += 1
 
     # These numbers '57' and '64' are very specific to my problem.
     # Need to find a generalized way of fixing these numbers.
@@ -488,7 +479,15 @@ def transform_for_opencl(program):
         #         outer_tag="g.0")
         pass
     else:
-
+        new_space = kernel.domains[0].get_space()
+        pos = 1
+        for dom in kernel.domains[1:]:
+            # cartesian product of all the spaces
+            for dim_name, (dim_type, _) in dom.get_space().get_var_dict().items():
+                assert dim_type == 3
+                new_space = new_space.add_dims(dim_type, 1)
+                new_space = new_space.set_dim_name(dim_type, pos, dim_name)
+                pos += 1
         new_domain = isl.BasicSet.universe(new_space)
         for dom in kernel.domains[:]:
             for constraint in dom.get_constraints():
@@ -508,6 +507,8 @@ def transform_for_opencl(program):
         ncells_per_threadblock = np.lcm(nquad, nbasis)
         nthreadblocks_per_chunk = 32  # multiple of 32 in order to avoid 1/2 warps
         nchunks = (32*6*32*6*2)/(nthreadblocks_per_chunk * ncells_per_threadblock)  # numerator is the number of elements
+        print(kernel.arg_dict)
+        1/0
 
         kernel = loopy.split_iname(kernel, "n", int(nchunks), outer_iname="ichunk", outer_tag="g.0")
         kernel = loopy.split_iname(kernel, "n_inner",
@@ -519,9 +520,11 @@ def transform_for_opencl(program):
         jacobi_matrix_vars = ['form_t8', 'form_t9', 'form_t10', 'form_t11', 'form_t12']
 
         kernel = _merged_batch(kernel, 'form_ip', [], ['form_t16', 'form_t17'],
-                within="id:form_insn_12 or id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
-        kernel = _merged_batch(kernel, 'icell', [], ['t0', 't2', 'form_t16', 'form_t17'] + jacobi_matrix_vars)
-        kernel = _merged_batch(kernel, 'ithreadblock', [], ['t0', 't2', 'form_t16', 'form_t17'] + jacobi_matrix_vars)
+                within="id:form_insn_12 or id:form_insn_13 or id:form_insn_14"
+                " or id:form_insn_15 or id:form_insn_17 or id:form_insn_18")
+        kernel = _merged_batch(kernel, 'icell', [], ['t0', 't1', 't2', 'form_t16', 'form_t17'] + jacobi_matrix_vars)
+        kernel = _merged_batch(kernel, 'ithreadblock', [], ['t0', 't1', 't2', 'form_t16', 'form_t17'] + jacobi_matrix_vars)
+
         kernel = loopy.duplicate_inames(kernel, ["form_ip"],
                 new_inames=["form_ip_quad"], within="id:form_insn_12 or id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
         kernel = loopy.add_barrier(kernel, "id:statement2",
@@ -552,7 +555,8 @@ def transform_for_opencl(program):
                 inner_iname="inner_basis_cell", outer_iname="outer_basis_cell",
                 within=basis_within)
         kernel = loopy.join_inames(kernel, ["ithreadblock", "outer_basis_cell",
-            "form_j"], "local_id3", within=(basis_within+" and not id:statement3"))
+            "form_j"], "local_id3", within=(basis_within+" and not"
+                " id:statement3"))
         kernel = loopy.join_inames(kernel, ["ithreadblock", "outer_quad_cell",
             "i8"], "local_id4", within="id:statement3")
         kernel = loopy.tag_inames(kernel, {
@@ -563,7 +567,16 @@ def transform_for_opencl(program):
             "local_id4": "l.0",
             })
 
-        print(kernel)
+        shared_vars = ['t0', 't1', 't2', 'form_t8', 'form_t9', 'form_t10',
+                'form_t11', 'form_t12', 'form_t16', 'form_t17']
+        new_temps = dict((tv.name,
+            tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv in shared_vars
+            else (tv.name, tv) for tv in kernel.temporary_variables.values())
+        kernel = kernel.copy(temporary_variables=new_temps)
+        print(kernel.arg_dict)
+
+        program = program.with_root_kernel(kernel)
+        print(loopy.generate_code_v2(program))
         1/0
         _LOCAL_SIZE = 64
         kernel = loopy.split_iname(kernel, "n", _LOCAL_SIZE, inner_tag="l.0",
