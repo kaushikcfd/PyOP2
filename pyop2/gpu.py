@@ -33,6 +33,8 @@
 
 """OP2 GPU backend."""
 
+_AVOID_PROCESSING = True
+
 import os
 import ctypes
 import islpy as isl
@@ -622,7 +624,6 @@ def transform_for_opencl(program):
             "i8"], "local_id4", within="id:statement3")
 
         # }}}
-        print(kernel)
 
         # tagging inames
         kernel = loopy.tag_inames(kernel, {
@@ -655,12 +656,15 @@ def transform_for_opencl(program):
 
 
 def generate_cl_kernel_compiler_executor(kernel):
-
     import pyopencl as cl
     from mako.template import Template
 
-    kernel = transform_for_opencl(kernel)
-    lsize, gsize = get_grid_sizes(kernel)
+    if _AVOID_PROCESSING and (kernel.name not in ['wrap_zero', 'wrap_copy']):
+        lsize = (192,)
+        gsize = None
+    else:
+        kernel = transform_for_opencl(kernel)
+        lsize, gsize = get_grid_sizes(kernel)
 
     if not lsize:
         # lsize has not been set => run serially on a GPU
@@ -805,7 +809,100 @@ extern "C" void ${kernel_name}_executor(cl_kernel cl_knl, ${', '.join(v[2] for v
 '''
     c_code = Template(c_code_str)
 
-    kernel_src = loopy.generate_code_v2(kernel).device_code().replace('\n',
+    if _AVOID_PROCESSING and (kernel.name not in ['wrap_zero', 'wrap_copy']):
+        kernel_src = (
+                """#define lid(N) ((int) get_local_id(N))
+#define gid(N) ((int) get_group_id(N))
+#pragma OPENCL EXTENSION cl_khr_int64_base_atomics : enable
+#if __OPENCL_C_VERSION__ < 120
+#pragma OPENCL EXTENSION cl_khr_fp64: enable
+#endif
+
+__constant double const form_t13[3] = { 0.16666666666666666, 0.16666666666666666, 0.16666666666666666 };
+__constant double const form_t14[3 * 6] = { -1.6666666666666674, -0.33333333333333565, 0.0, 0.6666666666666653, -0.6666666666666653, 2.0, 0.33333333333333287, -0.33333333333333387, 0.0, 2.6666666666666625, -2.6666666666666625, 0.0, 0.3333333333333351, 1.6666666666666663, 0.0, 0.6666666666666651, -0.6666666666666651, -2.0 };
+__constant double const form_t15[3 * 6] = { -1.6666666666666716, 0.0, -0.3333333333333325, 0.6666666666666555, 2.0, -0.6666666666666661, 0.33333333333332754, 0.0, 1.6666666666666687, 0.6666666666666513, -1.9999999999999896, -0.6666666666666659, 0.33333333333332826, 0.0, -0.3333333333333324, 2.6666666666666523, 1.1623594919199648e-14, -2.666666666666668 };
+
+__kernel void __attribute__ ((reqd_work_group_size(192, 1, 1))) wrap_form0_cell_integral_otherwise(int const start, int const end, __global volatile double *__restrict__ dat0, __global double const *__restrict__ dat1, __global double const *__restrict__ dat2, __global int const *__restrict__ map0, __global int const *__restrict__ map1)
+{
+  double form_t0;
+  double form_t1;
+  __local double form_t10[32 * 6];
+  __local double form_t11[32 * 6];
+  __local double form_t12[32 * 6];
+  __local double form_t16[32 * 6 * 3];
+  __local double form_t17[32 * 6 * 3];
+  double form_t18;
+  double form_t19;
+  double form_t2;
+  double form_t20;
+  double form_t21;
+  double form_t22;
+  double form_t3;
+  double form_t4;
+  double form_t5;
+  double form_t6;
+  double form_t7;
+  __local double form_t8[32 * 6];
+  __local double form_t9[32 * 6];
+  __local double t0[32 * 6 * 6];
+  __local double t1[32 * 6 * 3 * 2];
+  __local double t2[32 * 6 * 6];
+
+  for (int i6 = 0; i6 <= 5; ++i6)
+    t2[36 * (lid(0) / 6) + 6 * (lid(0) + -6 * (lid(0) / 6)) + i6] = dat2[map0[6 * (192 * gid(0) + lid(0)) + i6]];
+  for (int i2 = 0; i2 <= 2; ++i2)
+    for (int i3 = 0; i3 <= 1; ++i3)
+      t1[36 * (lid(0) / 6) + 6 * (lid(0) + -6 * (lid(0) / 6)) + 2 * i2 + i3] = dat1[2 * map1[3 * (192 * gid(0) + lid(0)) + i2] + i3];
+  for (int i0 = 0; i0 <= 5; ++i0)
+    t0[36 * (lid(0) / 6) + 6 * (lid(0) + -6 * (lid(0) / 6)) + i0] = 0.0;
+  barrier(CLK_LOCAL_MEM_FENCE) /* Barrier inserted due to l_barrier */;
+  for (int inner_quad_cell = 0; inner_quad_cell <= 2; ++inner_quad_cell)
+  {
+    form_t0 = -1.0 * t1[36 * (lid(0) / 6) + 6 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6))];
+    form_t1 = form_t0 + t1[36 * (lid(0) / 6) + 6 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + 2];
+    form_t2 = -1.0 * t1[36 * (lid(0) / 6) + 6 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + 1];
+    form_t3 = form_t2 + t1[36 * (lid(0) / 6) + 6 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + 4 + 1];
+    form_t4 = form_t0 + t1[36 * (lid(0) / 6) + 6 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + 4];
+    form_t5 = form_t2 + t1[36 * (lid(0) / 6) + 6 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + 2 + 1];
+    form_t6 = form_t1 * form_t3 + -1.0 * form_t4 * form_t5;
+    form_t7 = 1.0 / form_t6;
+    form_t8[6 * (lid(0) / 6) + inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)] = form_t1 * form_t7;
+    form_t9[6 * (lid(0) / 6) + inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)] = form_t7 * -1.0 * form_t4;
+    form_t10[6 * (lid(0) / 6) + inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)] = form_t7 * -1.0 * form_t5;
+    form_t11[6 * (lid(0) / 6) + inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)] = form_t3 * form_t7;
+    form_t12[6 * (lid(0) / 6) + inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)] = fabs(form_t6);
+    form_t17[18 * (lid(0) / 6) + 3 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + lid(0) + -3 * (lid(0) / 3)] = 0.0;
+    form_t16[18 * (lid(0) / 6) + 3 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + lid(0) + -3 * (lid(0) / 3)] = 0.0;
+    for (int form_i = 0; form_i <= 5; ++form_i)
+    {
+      form_t16[18 * (lid(0) / 6) + 3 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + lid(0) + -3 * (lid(0) / 3)] = form_t16[18 * (lid(0) / 6) + 3 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + lid(0) + -3 * (lid(0) / 3)] + form_t15[6 * (lid(0) + -3 * (lid(0) / 3)) + form_i] * t2[36 * (lid(0) / 6) + 6 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + form_i];
+      form_t17[18 * (lid(0) / 6) + 3 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + lid(0) + -3 * (lid(0) / 3)] = form_t17[18 * (lid(0) / 6) + 3 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + lid(0) + -3 * (lid(0) / 3)] + form_t14[6 * (lid(0) + -3 * (lid(0) / 3)) + form_i] * t2[36 * (lid(0) / 6) + 6 * (inner_quad_cell + 3 * (lid(0) / 3) + -6 * (lid(0) / 6)) + form_i];
+    }
+  }
+  barrier(CLK_LOCAL_MEM_FENCE) /* Barrier inserted due to l_barrier_0 */;
+  for (int inner_basis_cell = 0; inner_basis_cell <= 5; ++inner_basis_cell)
+  {
+    for (int form_ip = 0; form_ip <= 2; ++form_ip)
+    {
+      form_t18 = form_t13[form_ip] * form_t12[6 * (lid(0) / 6) + inner_basis_cell];
+      form_t19 = form_t11[6 * (lid(0) / 6) + inner_basis_cell] * form_t17[18 * (lid(0) / 6) + 3 * inner_basis_cell + form_ip] + form_t10[6 * (lid(0) / 6) + inner_basis_cell] * form_t16[18 * (lid(0) / 6) + 3 * inner_basis_cell + form_ip];
+      form_t20 = form_t9[6 * (lid(0) / 6) + inner_basis_cell] * form_t17[18 * (lid(0) / 6) + 3 * inner_basis_cell + form_ip] + form_t8[6 * (lid(0) / 6) + inner_basis_cell] * form_t16[18 * (lid(0) / 6) + 3 * inner_basis_cell + form_ip];
+      form_t21 = form_t18 * (form_t19 * form_t10[6 * (lid(0) / 6) + inner_basis_cell] + form_t20 * form_t8[6 * (lid(0) / 6) + inner_basis_cell]);
+      form_t22 = form_t18 * (form_t19 * form_t11[6 * (lid(0) / 6) + inner_basis_cell] + form_t20 * form_t9[6 * (lid(0) / 6) + inner_basis_cell]);
+      t0[36 * (lid(0) / 6) + 6 * inner_basis_cell + lid(0) + -6 * (lid(0) / 6)] = t0[36 * (lid(0) / 6) + 6 * inner_basis_cell + lid(0) + -6 * (lid(0) / 6)] + form_t14[6 * form_ip + lid(0) + -6 * (lid(0) / 6)] * form_t22 + form_t15[6 * form_ip + lid(0) + -6 * (lid(0) / 6)] * form_t21;
+    }
+    double loopy_old_val;
+    double loopy_new_val;
+    do
+    {
+      loopy_old_val = dat0[map0[6 * (192 * gid(0) + inner_basis_cell + 6 * (lid(0) / 6)) + lid(0) + -6 * (lid(0) / 6)]];
+      loopy_new_val = loopy_old_val + t0[36 * (lid(0) / 6) + 6 * inner_basis_cell + lid(0) + -6 * (lid(0) / 6)];
+    }
+    while (atom_cmpxchg((__global long *) &(dat0[map0[6 * (192 * gid(0) + inner_basis_cell + 6 * (lid(0) / 6)) + lid(0) + -6 * (lid(0) / 6)]]), *(long *) &loopy_old_val, *(long *) &loopy_new_val) != *(long *) &loopy_old_val);
+  }
+}""").replace('\n', '\\n"\n"')
+    else:
+        kernel_src = loopy.generate_code_v2(kernel).device_code().replace('\n',
                                                                       '\\n"\n"')
 
     return c_code.render(
