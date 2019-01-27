@@ -33,7 +33,7 @@
 
 """OP2 GPU backend."""
 
-_AVOID_PROCESSING = True
+_P2_THREAD_TRANSPOSITION = False
 
 import os
 import ctypes
@@ -477,180 +477,183 @@ def transform_for_opencl(program):
     # Need to find a generalized way of fixing these numbers.
     # These numbers are for problem with 512 x 512 square grid.
     if kernel.name in ['wrap_zero', 'wrap_copy']:
-        # kernel = loopy.split_iname(kernel, "n", 57, inner_tag="l.0",
-        #         outer_tag="g.0")
-        pass
+        kernel = loopy.split_iname(kernel, "n", 77, inner_tag="l.0",
+                outer_tag="g.0")
     else:
-        # problem size = 32*6*32*6*2(number of cells)
-        # number of vertices = (32*6+1)**2
+        if not _P2_THREAD_TRANSPOSITION:
+            kernel = loopy.split_iname(kernel, "n", 64,
+                    inner_tag="l.0", outer_tag="g.0")
+        else:
+            1/0
+            # problem size = 32*6*32*6*2(number of cells)
+            # number of vertices = (32*6+1)**2
 
-        # For now hardcoding  the values in order to check the transformation
+            # For now hard-coding  the values in order to check the transformation
 
-        # {{{ init phase, which should be pulled form the for   m
+            # {{{ init phase, which should be pulled form the for   m
 
-        nquad = 3
-        nbasis = 6
-        ncells_per_threadblock = np.lcm(nquad, nbasis)
-        nthreadblocks_per_chunk = 32  # multiple of 32 in order to avoid 1/2 warps
-        kernel = loopy.assume(kernel, "start = 0 and end = (192*192*2)")
-        load_within = (
-                "id:statement0 or id:statement1 or id:statement2 or id:form__start")
-        quad_within = (
-                "id:form_insn or id:form_insn_0 or id:form_insn_1 or id:form_insn_2"
-                " or id:form_insn_3 or id:form_insn_4 or id:form_insn_5 or id:form_insn_6"
-                " or id:form_insn_7 or id:form_insn_8 or id:form_insn_9 or id:form_insn_10"
-                " or id:form_insn_11"
-                " or id:form_insn_12 or id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
-        basis_within = "not (" + quad_within + " or " + load_within + ")"
+            nquad = 3
+            nbasis = 6
+            ncells_per_threadblock = np.lcm(nquad, nbasis)
+            nthreadblocks_per_chunk = 32  # multiple of 32 in order to avoid 1/2 warps
+            kernel = loopy.assume(kernel, "start = 0 and end = (192*192*2)")
+            load_within = (
+                    "id:statement0 or id:statement1 or id:statement2 or id:form__start")
+            quad_within = (
+                    "id:form_insn or id:form_insn_0 or id:form_insn_1 or id:form_insn_2"
+                    " or id:form_insn_3 or id:form_insn_4 or id:form_insn_5 or id:form_insn_6"
+                    " or id:form_insn_7 or id:form_insn_8 or id:form_insn_9 or id:form_insn_10"
+                    " or id:form_insn_11"
+                    " or id:form_insn_12 or id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
+            basis_within = "not (" + quad_within + " or " + load_within + ")"
 
-        # }}}
+            # }}}
 
-        # {{{ realizing threadblocks and local cells
+            # {{{ realizing threadblocks and local cells
 
-        kernel = loopy.split_iname(kernel, "n",
-                int(nthreadblocks_per_chunk * ncells_per_threadblock),
-                outer_iname="ichunk")
-        kernel = loopy.split_iname(kernel, "n_inner",
-                int(ncells_per_threadblock), outer_iname="ithreadblock",
-                inner_iname="icell")
+            kernel = loopy.split_iname(kernel, "n",
+                    int(nthreadblocks_per_chunk * ncells_per_threadblock),
+                    outer_iname="ichunk")
+            kernel = loopy.split_iname(kernel, "n_inner",
+                    int(ncells_per_threadblock), outer_iname="ithreadblock",
+                    inner_iname="icell")
 
-        # }}}
+            # }}}
 
-        # {{{ storing copies in the loops (DE-LICMing)
+            # {{{ storing copies in the loops (DE-LICMing)
 
-        from loopy.transform.batch import _merged_batch
+            from loopy.transform.batch import _merged_batch
 
-        # the four entries of the matrix and the determinant
-        jacobi_matrix_vars = ['form_t8', 'form_t9', 'form_t10', 'form_t11',
-                'form_t12']
+            # the four entries of the matrix and the determinant
+            jacobi_matrix_vars = ['form_t8', 'form_t9', 'form_t10', 'form_t11',
+                    'form_t12']
 
-        # the variables storing the values at the quadrature
-        kernel = _merged_batch(kernel, 'form_ip', [], ['form_t16', 'form_t17'],
-                within="id:form_insn_12 or id:form_insn_13 or id:form_insn_14"
-                " or id:form_insn_15 or id:form_insn_17 or id:form_insn_18")
+            # the variables storing the values at the quadrature
+            kernel = _merged_batch(kernel, 'form_ip', [], ['form_t16', 'form_t17'],
+                    within="id:form_insn_12 or id:form_insn_13 or id:form_insn_14"
+                    " or id:form_insn_15 or id:form_insn_17 or id:form_insn_18")
 
-        kernel = _merged_batch(kernel, 'icell', [], ['t0', 't1', 't2',
-            'form_t16', 'form_t17'] + jacobi_matrix_vars)
+            kernel = _merged_batch(kernel, 'icell', [], ['t0', 't1', 't2',
+                'form_t16', 'form_t17'] + jacobi_matrix_vars)
 
-        kernel = _merged_batch(kernel, 'ithreadblock', [], ['t0', 't1', 't2',
-            'form_t16', 'form_t17'] + jacobi_matrix_vars)
+            kernel = _merged_batch(kernel, 'ithreadblock', [], ['t0', 't1', 't2',
+                'form_t16', 'form_t17'] + jacobi_matrix_vars)
 
-        # }}}
+            # }}}
 
-        # {{{ duplicating the inames for independent parts
+            # {{{ duplicating the inames for independent parts
 
-        kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
-                new_inames=["ichunk_load", "ithreadblock_load", "icell_load"],
-                within=load_within)
+            kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
+                    new_inames=["ichunk_load", "ithreadblock_load", "icell_load"],
+                    within=load_within)
 
-        kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
-                new_inames=["ichunk_quad", "ithreadblock_quad", "icell_quad"],
-                within=quad_within)
+            kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
+                    new_inames=["ichunk_quad", "ithreadblock_quad", "icell_quad"],
+                    within=quad_within)
 
-        kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
-                new_inames=["ichunk_basis", "ithreadblock_basis", "icell_basis"],
-                within=basis_within)
+            kernel = loopy.duplicate_inames(kernel, ["ichunk", "ithreadblock", "icell"],
+                    new_inames=["ichunk_basis", "ithreadblock_basis", "icell_basis"],
+                    within=basis_within)
 
-        kernel = loopy.duplicate_inames(kernel, ["form_ip"],
-                new_inames=["form_ip_quad"], within="id:form_insn_12 or"
-                " id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
+            kernel = loopy.duplicate_inames(kernel, ["form_ip"],
+                    new_inames=["form_ip_quad"], within="id:form_insn_12 or"
+                    " id:form_insn_13 or id:form_insn_14 or id:form_insn_15")
 
-        kernel = loopy.remove_unused_inames(kernel)
-        assert not (frozenset(["ithreadblock", "icell", "n", "ichunk"])
-                & kernel.all_inames())
+            kernel = loopy.remove_unused_inames(kernel)
+            assert not (frozenset(["ithreadblock", "icell", "n", "ichunk"])
+                    & kernel.all_inames())
 
-        # }}}
+            # }}}
 
-        # {{{ coalescing the entire domain forest
+            # {{{ coalescing the entire domain forest
 
-        new_space = kernel.domains[0].get_space()
-        pos = kernel.domains[0].n_dim()
-        for dom in kernel.domains[1:]:
-            # cartesian product of all the spaces
-            for dim_name, (dim_type, _) in dom.get_space().get_var_dict().items():
-                assert dim_type == 3
-                new_space = new_space.add_dims(dim_type, 1)
-                new_space = new_space.set_dim_name(dim_type, pos, dim_name)
-                pos += 1
+            new_space = kernel.domains[0].get_space()
+            pos = kernel.domains[0].n_dim()
+            for dom in kernel.domains[1:]:
+                # product of all the spaces
+                for dim_name, (dim_type, _) in dom.get_space().get_var_dict().items():
+                    assert dim_type == 3
+                    new_space = new_space.add_dims(dim_type, 1)
+                    new_space = new_space.set_dim_name(dim_type, pos, dim_name)
+                    pos += 1
 
-        new_domain = isl.BasicSet.universe(new_space)
-        for dom in kernel.domains[:]:
-            for constraint in dom.get_constraints():
-                new_domain = (
-                        new_domain.add_constraint(
-                            isl.Constraint.ineq_from_names(new_space,
-                                constraint.get_coefficients_by_name())))
+            new_domain = isl.BasicSet.universe(new_space)
+            for dom in kernel.domains[:]:
+                for constraint in dom.get_constraints():
+                    new_domain = (
+                            new_domain.add_constraint(
+                                isl.Constraint.ineq_from_names(new_space,
+                                    constraint.get_coefficients_by_name())))
 
-        kernel = kernel.copy(domains=[new_domain])
+            kernel = kernel.copy(domains=[new_domain])
 
-        # }}}
+            # }}}
 
-        # {{{ adding barriers
+            # {{{ adding barriers
 
-        kernel = loopy.add_barrier(kernel, "id:statement2",
-                "id:form_insn", synchronization_kind='local')
-        kernel = loopy.add_barrier(kernel, "id:form_insn_15",
-                "id:form_insn_16", synchronization_kind='local')
+            kernel = loopy.add_barrier(kernel, "id:statement2",
+                    "id:form_insn", synchronization_kind='local')
+            kernel = loopy.add_barrier(kernel, "id:form_insn_15",
+                    "id:form_insn_16", synchronization_kind='local')
 
-        # }}}
+            # }}}
 
-        # {{{ re-distributing the gather work
+            # {{{ re-distributing the gather work
 
-        kernel = loopy.join_inames(kernel, ["ithreadblock_load", "icell_load"],
-                "local_id1", within=load_within)
+            kernel = loopy.join_inames(kernel, ["ithreadblock_load", "icell_load"],
+                    "local_id1", within=load_within)
 
-        # }}}
+            # }}}
 
-        # {{{ re-distributing the quadrature evaluation work
+            # {{{ re-distributing the quadrature evaluation work
 
-        kernel = loopy.split_iname(kernel, "icell_quad", nquad,
-                inner_iname="inner_quad_cell", outer_iname="outer_quad_cell",
-                within=quad_within)
+            kernel = loopy.split_iname(kernel, "icell_quad", nquad,
+                    inner_iname="inner_quad_cell", outer_iname="outer_quad_cell",
+                    within=quad_within)
 
-        kernel = loopy.join_inames(kernel, ["ithreadblock_quad", "outer_quad_cell",
-            "form_ip_quad"], "local_id2", within=quad_within)
+            kernel = loopy.join_inames(kernel, ["ithreadblock_quad", "outer_quad_cell",
+                "form_ip_quad"], "local_id2", within=quad_within)
 
-        # }}}
+            # }}}
 
-        # {{{ re-distributing the quadrature evaluation work
+            # {{{ re-distributing the quadrature evaluation work
 
-        kernel = loopy.split_iname(kernel, "icell_basis", nbasis,
-                inner_iname="inner_basis_cell", outer_iname="outer_basis_cell",
-                within=basis_within)
-        kernel = loopy.join_inames(kernel, ["ithreadblock_basis", "outer_basis_cell",
-            "form_j"], "local_id3", within=(basis_within+" and not"
-                " id:statement3"))
-        kernel = loopy.join_inames(kernel, ["ithreadblock_basis", "outer_basis_cell",
-            "i8"], "local_id4", within="id:statement3")
+            kernel = loopy.split_iname(kernel, "icell_basis", nbasis,
+                    inner_iname="inner_basis_cell", outer_iname="outer_basis_cell",
+                    within=basis_within)
+            kernel = loopy.join_inames(kernel, ["ithreadblock_basis", "outer_basis_cell",
+                "form_j"], "local_id3", within=(basis_within+" and not"
+                    " id:statement3"))
+            kernel = loopy.join_inames(kernel, ["ithreadblock_basis", "outer_basis_cell",
+                "i8"], "local_id4", within="id:statement3")
 
-        # }}}
+            # }}}
 
-        # tagging inames
-        kernel = loopy.tag_inames(kernel, {
-            "ichunk_load":  "g.0",
-            "ichunk_quad":  "g.0",
-            "ichunk_basis": "g.0",
-            "local_id1":    "l.0",
-            "local_id2":    "l.0",
-            "local_id3":    "l.0",
-            "local_id4":    "l.0",
-            })
+            # tagging inames
+            kernel = loopy.tag_inames(kernel, {
+                "ichunk_load":  "g.0",
+                "ichunk_quad":  "g.0",
+                "ichunk_basis": "g.0",
+                "local_id1":    "l.0",
+                "local_id2":    "l.0",
+                "local_id3":    "l.0",
+                "local_id4":    "l.0",
+                })
 
-        shared_vars = ['t0', 't1', 't2', 'form_t8', 'form_t9', 'form_t10',
-                'form_t11', 'form_t12', 'form_t16', 'form_t17']
-        new_temps = dict((tv.name,
-            tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv in shared_vars
-            else (tv.name, tv) for tv in kernel.temporary_variables.values())
-        kernel = kernel.copy(temporary_variables=new_temps)
-        no_sync_with = frozenset([(insn.id, 'local') for insn in
-            kernel.instructions])
-        new_insns = [insn.copy(no_sync_with=no_sync_with) for
-            insn in kernel.instructions]
-        kernel = kernel.copy(instructions=new_insns)
-        program = program.with_root_kernel(kernel).copy(
-            target=loopy.PyOpenCLTarget())
-        print(loopy.generate_code_v2(program).device_code())
-        1/0
+            shared_vars = ['t0', 't1', 't2', 'form_t8', 'form_t9', 'form_t10',
+                    'form_t11', 'form_t12', 'form_t16', 'form_t17']
+            new_temps = dict((tv.name,
+                tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv in shared_vars
+                else (tv.name, tv) for tv in kernel.temporary_variables.values())
+            kernel = kernel.copy(temporary_variables=new_temps)
+            no_sync_with = frozenset([(insn.id, 'local') for insn in
+                kernel.instructions])
+            new_insns = [insn.copy(no_sync_with=no_sync_with) for
+                insn in kernel.instructions]
+            kernel = kernel.copy(instructions=new_insns)
+            program = program.with_root_kernel(kernel).copy(
+                target=loopy.PyOpenCLTarget())
+            print(loopy.generate_code_v2(program).device_code())
 
     return program.with_root_kernel(kernel)
 
@@ -659,7 +662,7 @@ def generate_cl_kernel_compiler_executor(kernel):
     import pyopencl as cl
     from mako.template import Template
 
-    if _AVOID_PROCESSING and (kernel.name not in ['wrap_zero', 'wrap_copy']):
+    if _P2_THREAD_TRANSPOSITION and (kernel.name not in ['wrap_zero', 'wrap_copy']):
         lsize = (192,)
         gsize = None
     else:
@@ -809,7 +812,7 @@ extern "C" void ${kernel_name}_executor(cl_kernel cl_knl, ${', '.join(v[2] for v
 '''
     c_code = Template(c_code_str)
 
-    if _AVOID_PROCESSING and (kernel.name not in ['wrap_zero', 'wrap_copy']):
+    if _P2_THREAD_TRANSPOSITION and (kernel.name not in ['wrap_zero', 'wrap_copy']):
         kernel_src = (
                 """#define lid(N) ((int) get_local_id(N))
 #define gid(N) ((int) get_group_id(N))
