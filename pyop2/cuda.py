@@ -236,11 +236,17 @@ class JITModule(base.JITModule):
         block = (int(evaluate(llens, parameters)[0]), 1, 1)
         return grid, block
 
+    @memoize_method
+    def extra_global_arg(self, size):
+        print("DAnda no...")
+        return cuda_driver.mem_alloc(int(size))
+
     @collective
     def __call__(self, *args):
         grid, block = self.grid_size(args[0], args[1])
+        quadrature_arg = self.extra_global_arg(8*25*(args[1]-args[0]))
 
-        return self._fun.prepared_call(grid, block, *args)
+        return self._fun.prepared_call(grid, block, *(args+(quadrature_arg,)))
 
     @cached_property
     def _wrapper_name(self):
@@ -285,7 +291,7 @@ class JITModule(base.JITModule):
             options.append("-lineinfo")
         func = SourceModule(self.code_to_compile, options=options)
         self._fun = func.get_function(self._wrapper_name)
-        self._fun.prepare(self.argtypes)
+        self._fun.prepare(self.argtypes+"P")
 
         # Blow away everything we don't need any more
         del self._args
@@ -1030,7 +1036,7 @@ def generalize_gcd_tt(kernel):
 
     nthreads_per_cell = int(np.gcd(nquad, nbasis))
     # should be the minimum number needed to make `nthreads_per_cell` multiple of 32
-    ncells_per_chunk = 16
+    ncells_per_chunk = 64
     load_within = "tag:gather"
     quad_within = "tag:quadrature"
     basis_within = "tag:basis"
@@ -1241,6 +1247,240 @@ def generalize_gcd_tt(kernel):
     return loopy.remove_unused_inames(kernel).copy(loop_priority=frozenset())
 
 
+def two_stage_split(kernel):
+    nquad = int(loopy.symbolic.pw_aff_to_expr(
+            kernel.get_iname_bounds('form_ip', constants_only=True).size))
+    nbasis = int(loopy.symbolic.pw_aff_to_expr(
+            kernel.get_iname_bounds('form_j', constants_only=True).size))
+
+    nthreads_per_cell = int(np.gcd(nquad, nbasis))
+    # should be the minimum number needed to make `nthreads_per_cell` multiple of 32
+    ncells_per_chunk = 6
+    quad_within = "tag:quadrature"
+    basis_within = "tag:basis"
+
+    # {{{ realizing work groups
+
+    kernel = loopy.split_iname(kernel, "n",
+            ncells_per_chunk,
+            outer_iname="ichunk", inner_iname="icell")
+
+    # }}}
+
+    # {{{ remove noops
+
+    noop_insns = set([insn.id for insn in kernel.instructions if
+            isinstance(insn, loopy.NoOpInstruction)])
+    kernel = loopy.remove_instructions(kernel, noop_insns)
+
+    # }}}
+
+    # {{{ extracting variables that are need to be stored between stages.
+
+    temp_vars = frozenset(kernel.temporary_variables.keys())
+
+    written_in_load = frozenset().union(*[insn.write_dependency_names() for
+        insn in kernel.instructions if 'gather' in insn.tags]) & temp_vars
+
+    written_in_quad = frozenset().union(*[insn.write_dependency_names() for
+        insn in kernel.instructions if 'quadrature' in insn.tags]) & temp_vars
+
+    read_in_quad = frozenset().union(*[insn.read_dependency_names() for
+        insn in kernel.instructions if 'quadrature' in insn.tags]) & temp_vars
+
+    read_in_basis = frozenset().union(*[insn.read_dependency_names() for
+        insn in kernel.instructions if 'basis' in insn.tags]) & temp_vars
+
+    # }}}
+
+    # {{{ remove unnecessary dependencies on quadrature instructions
+
+    vars_not_neeeded_in_quad = written_in_load - read_in_quad
+
+    # so lets just write in the basis part
+    written_in_load = written_in_load - vars_not_neeeded_in_quad
+
+    insns_to_be_added_in_basis = frozenset([insn.id for insn in
+        kernel.instructions if insn.write_dependency_names()
+        & vars_not_neeeded_in_quad and 'gather' in insn.tags])
+
+    def _remove_unnecessary_deps_on_load(insn):
+        return insn.copy(depends_on=insn.depends_on - insns_to_be_added_in_basis)
+
+    kernel = loopy.map_instructions(kernel, quad_within,
+            _remove_unnecessary_deps_on_load)
+
+    def _add_unnecessary_instructions_to_basis(insn):
+        if insn.id in insns_to_be_added_in_basis:
+            return insn.copy(tags=insn.tags-frozenset(["gather"])
+                | frozenset(["basis"]))
+        return insn
+    kernel = loopy.map_instructions(kernel, "id:*",
+            _add_unnecessary_instructions_to_basis)
+
+    # }}}
+
+    # {{{ storing values between the stages
+
+    batch_vars = (written_in_quad & read_in_basis)
+    kernel = loopy.save_temporaries_in_loop(kernel, 'form_ip', batch_vars, within='iname:form_ip')
+
+    batch_vars = (written_in_quad & read_in_basis) | (written_in_load & (read_in_basis | read_in_quad))
+    kernel = loopy.save_temporaries_in_loop(kernel, 'icell', batch_vars)
+
+    quadrature_vars = (written_in_quad & read_in_basis)
+    kernel = loopy.save_temporaries_in_loop(kernel, 'ichunk', quadrature_vars)
+
+    # }}}
+
+    # {{{ duplicating inames
+
+    kernel = loopy.duplicate_inames(kernel, ["ichunk", "icell"],
+            new_inames=["ichunk_load", "icell_load"],
+            within="tag:gather")
+
+    kernel = loopy.duplicate_inames(kernel, ["ichunk", "icell"],
+            new_inames=["ichunk_quad", "icell_quad"],
+            within="tag:quadrature")
+
+    kernel = loopy.duplicate_inames(kernel, ["ichunk", "icell"],
+            new_inames=["ichunk_basis", "icell_basis"],
+            within="tag:basis or tag:scatter")
+
+    kernel = loopy.duplicate_inames(kernel, ["form_ip"],
+            new_inames=["form_ip_quad"], within="tag:quadrature")
+    kernel = loopy.duplicate_inames(kernel, ["form_ip"],
+            new_inames=["form_ip_basis"], within="tag:basis")
+
+    kernel = loopy.remove_unused_inames(kernel)
+
+    assert not (frozenset(["ithreadblock", "icell", "n", "ichunk"])
+            & kernel.all_inames())
+
+    # }}}
+
+    # {{{ interpreting the first domain as cuboid
+
+    new_space = kernel.domains[0].get_space()
+    new_dom = islpy.BasicSet.universe(new_space)
+    for stage in ['load', 'quad', 'basis']:
+        new_dom = new_dom.add_constraint(
+                islpy.Constraint.ineq_from_names(new_space, {
+                    'icell_%s' % stage: -1,
+                    1: ncells_per_chunk-1}))
+        new_dom = new_dom.add_constraint(
+                islpy.Constraint.ineq_from_names(new_space, {
+                    'icell_%s' % stage: 1}))
+
+        new_dom = new_dom.add_constraint(
+                islpy.Constraint.ineq_from_names(new_space, {
+                    'ichunk_%s' % stage:
+                    -(ncells_per_chunk),
+                    'start': -1, 'end': 1, 1: -1}))
+        new_dom = new_dom.add_constraint(
+                islpy.Constraint.ineq_from_names(new_space, {
+                    'ichunk_%s' % stage: 1}))
+
+    kernel = kernel.copy(domains=[new_dom]+kernel.domains[1:])
+
+    # }}}
+
+    # {{{ coalescing the entire domain forest
+
+    new_space = kernel.domains[0].get_space()
+    pos = kernel.domains[0].n_dim()
+    for dom in kernel.domains[1:]:
+        # product of all the spaces
+        for dim_name, (dim_type, _) in dom.get_space().get_var_dict().items():
+            assert dim_type == 3
+            new_space = new_space.add_dims(dim_type, 1)
+            new_space = new_space.set_dim_name(dim_type, pos, dim_name)
+            pos += 1
+
+    new_domain = islpy.BasicSet.universe(new_space)
+    for dom in kernel.domains[:]:
+        for constraint in dom.get_constraints():
+            if constraint.is_equality():
+                new_domain = (
+                        new_domain.add_constraint(
+                            islpy.Constraint.eq_from_names(new_space,
+                                constraint.get_coefficients_by_name())))
+            else:
+                new_domain = (
+                        new_domain.add_constraint(
+                            islpy.Constraint.ineq_from_names(new_space,
+                                constraint.get_coefficients_by_name())))
+
+    kernel = kernel.copy(domains=[new_domain])
+
+    # }}}
+
+    kernel = loopy.add_barrier(kernel, "tag:gather",
+            "tag:quadrature", synchronization_kind='local')
+
+    kernel = loopy.add_barrier(kernel, "tag:quadrature",
+            "tag:basis", synchronization_kind='global')
+
+    # {{{ re-distributing the gather work
+
+    n_lids = 0
+
+    for insn in kernel.instructions:
+        if "gather" in insn.tags:
+            inames_to_merge = list(insn.within_inames
+                    - frozenset(["ichunk_load"]))
+            # maybe need to split to be valid for all cases?
+            kernel = loopy.join_inames(kernel, inames_to_merge, "local_id%d" %
+                    n_lids, within="id:%s" % insn.id)
+            n_lids += 1
+
+    # }}}
+
+    # {{{ re-distributing the quadrature evaluation work
+
+    kernel = loopy.join_inames(kernel, ["icell_quad",
+        "form_ip_quad"], "local_id%d" % n_lids, within=quad_within)
+    n_lids += 1
+
+    # }}}
+
+    # {{{ re-distributing the basis coeffs evaluation work
+
+    # FIXME: This is not general yet
+    kernel = loopy.rename_iname(kernel, "i0", "form_j", existing_ok=True)
+    kernel = loopy.rename_iname(kernel, "i8", "form_j", existing_ok=True)
+
+    # this is the one which we need to take care about.
+    kernel = loopy.join_inames(kernel, ["icell_basis", "form_j"],
+            "local_id%d" % n_lids, within=basis_within+" or tag:scatter")
+    n_lids += 1
+
+    # }}}
+
+    iname_tags = {
+        "ichunk_load":      "g.0",
+        "ichunk_quad":      "g.0",
+        "ichunk_basis":     "g.0"}
+    for i in range(n_lids):
+        iname_tags["local_id%d" % i] = "l.0"
+
+    kernel = loopy.tag_inames(kernel, iname_tags)
+    kernel = loopy.add_nosync(kernel, 'local', 'tag:basis', 'tag:scatter')
+    from loopy.transform.make_scalar import make_scalar
+    # generalize this
+    kernel = make_scalar(kernel, 't0')
+
+    new_temps = dict((tv.name,
+        tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv.name in batch_vars
+        else (tv.name, tv) for tv in kernel.temporary_variables.values())
+    new_temps = dict((tv.name,
+        tv.copy(address_space=loopy.AddressSpace.GLOBAL)) if tv.name in
+        quadrature_vars else (tv.name, tv) for tv in new_temps.values())
+    kernel = kernel.copy(temporary_variables=new_temps)
+
+    return loopy.remove_unused_inames(kernel).copy(loop_priority=frozenset())
+
+
 def generate_cuda_kernel(program):
 
     # Kernel transformations
@@ -1278,7 +1518,8 @@ def generate_cuda_kernel(program):
         # kernel = thread_transposition(kernel)
         # kernel = scpt(kernel)
         # kernel = global_tt(kernel)
-        kernel = generalize_gcd_tt(kernel)
+        # kernel = generalize_gcd_tt(kernel)
+        kernel = two_stage_split(kernel)
     else:
         # batch cells into groups
         # essentially, each thread computes unroll_size elements, each block computes unroll_size*block_size elements
@@ -1298,7 +1539,7 @@ def generate_cuda_kernel(program):
     code = loopy.generate_code_v2(program).device_code()
 
     if program.name == configuration["cuda_jitmodule_name"]:
-        with open('gcd_tt_p4.c', 'r') as f:
+        with open('2stage-p1.c', 'r') as f:
             code = f.read()
 
     print(code)
