@@ -1193,12 +1193,8 @@ def gcd_tt(kernel):
 
 
 def danda_gcd_tt(kernel, callables_table):
-    # Experiment with these numbers to get speedup
-    copy_consts_to_shared = True
-    pack_consts_to_globals = True
-    ncells_per_chunk = 16
-    prefetch_length = 13
-    args_to_make_global = []
+
+    # {{{ extract info. about the finite element
 
     nquad = int(loopy.symbolic.pw_aff_to_expr(
             kernel.get_iname_bounds('form_ip', constants_only=True).size))
@@ -1206,6 +1202,16 @@ def danda_gcd_tt(kernel, callables_table):
             kernel.get_iname_bounds('form_j', constants_only=True).size))
 
     nthreads_per_cell = int(np.gcd(nquad, nbasis))
+
+    # }}}
+
+    # Experiment with these numbers to get speedup
+    copy_consts_to_shared = True
+    pack_consts_to_globals = True
+    ncells_per_chunk = 16
+    prefetch_length = nthreads_per_cell
+    args_to_make_global = []
+
     # should be the minimum number needed to make `nthreads_per_cell` multiple of 32
     quad_within = "tag:quadrature"
     basis_within = "tag:basis"
@@ -1265,7 +1271,13 @@ def danda_gcd_tt(kernel, callables_table):
 
     # {{{ organize for prefetches
 
-    from loopy.transform.data import remove_unused_axes_in_temporaries
+    from loopy.transform.data import flatten_variable
+    kernel = flatten_variable(kernel, 'form_t4')
+    kernel = loopy.join_inames(kernel, ["icopy_0", "icopy_1"], "i_op_mats",
+            within='id:insn_copy_0')
+    from loopy.transform.data import (remove_unused_axes_in_temporaries,
+            simplify_index_expression_in_subscript)
+    kernel = simplify_index_expression_in_subscript(kernel, 'form_t4')
     kernel = remove_unused_axes_in_temporaries(kernel)
     #FIXME: The names of these symbols can be obtained automatically
     kernel = loopy.assignment_to_subst(kernel, "form_t3")
@@ -1526,13 +1538,16 @@ def danda_gcd_tt(kernel, callables_table):
 
     kernel = precompute_for_single_kernel(kernel, callables_table,
             subst_use="form_t4_subst", sweep_inames=[
-            'form_ip_quad_outer', 'form_i_inner', 'local_id0'],
+                'form_ip_quad_outer', 'form_i_inner', 'local_id0'],
             precompute_outer_inames=frozenset(['ichunk_quad',
-            'form_i_outer']),
+                'form_i_outer']),
             temporary_address_space=loopy.AddressSpace.LOCAL,
             precompute_inames=['icopy_0', 'icopy_1'],
+            temporary_name='form_t4_var',
             compute_insn_id='prftch_quad',
             within='id:form_insn_3')
+    print(kernel)
+    1/0
 
     kernel = loopy.join_inames(kernel, ["icopy_0", "icopy_1"],
             "aux_local_id%d" % n_lids, within="id:prftch_quad")
@@ -1648,8 +1663,6 @@ def generate_cuda_kernel(program):
 
     code = loopy.generate_code_v2(program).device_code()
     if kernel.name == configuration["cuda_jitmodule_name"]:
-        print(code)
-        1/0
         with open('danda.c', 'r') as f:
             code = f.read()
 
