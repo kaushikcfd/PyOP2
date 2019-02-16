@@ -1208,7 +1208,7 @@ def danda_gcd_tt(kernel, callables_table):
     # Experiment with these numbers to get speedup
     copy_consts_to_shared = True
     pack_consts_to_globals = True
-    ncells_per_chunk = 16
+    ncells_per_chunk = 32
     prefetch_length = nthreads_per_cell
     args_to_make_global = []
 
@@ -1537,21 +1537,18 @@ def danda_gcd_tt(kernel, callables_table):
             "id:form_insn_4")
 
     kernel = precompute_for_single_kernel(kernel, callables_table,
-            subst_use="form_t4_subst", sweep_inames=[
+            subst_use="form_t4_subst(h)", sweep_inames=[
                 'form_ip_quad_outer', 'form_i_inner', 'local_id0'],
             precompute_outer_inames=frozenset(['ichunk_quad',
                 'form_i_outer']),
             temporary_address_space=loopy.AddressSpace.LOCAL,
-            precompute_inames=['icopy_0', 'icopy_1'],
+            precompute_inames=['icopy_0'],
             temporary_name='form_t4_var',
+            default_tag=None,
             compute_insn_id='prftch_quad',
             within='id:form_insn_3')
-    print(kernel)
-    1/0
 
-    kernel = loopy.join_inames(kernel, ["icopy_0", "icopy_1"],
-            "aux_local_id%d" % n_lids, within="id:prftch_quad")
-    kernel = loopy.split_iname(kernel, "aux_local_id%d" % n_lids,
+    kernel = loopy.split_iname(kernel, "icopy_0",
             nthreads_per_cell * ncells_per_chunk, inner_tag="l.0",
             outer_tag="ilp",
             within="id:prftch_quad")
@@ -1564,6 +1561,8 @@ def danda_gcd_tt(kernel, callables_table):
             temporary_address_space=loopy.AddressSpace.PRIVATE,
             within='id:form_insn_3')
 
+    print(kernel)
+    1/0
     kernel = precompute_for_single_kernel(kernel, callables_table,
             subst_use="form_t3_subst", sweep_inames=['form_ip_quad_outer_1',
             'local_id0'],
@@ -1584,13 +1583,13 @@ def danda_gcd_tt(kernel, callables_table):
             precompute_outer_inames=frozenset(['ichunk_basis',
                 'form_ip_basis_outer']),
             temporary_address_space=loopy.AddressSpace.LOCAL,
-            precompute_inames=['icopy0', 'icopy1'],
-            fetch_bounding_box=True,
+            default_tag=None,
+            precompute_inames=['icopy0'],
+            temporary_name='form_t4_var',
+            fetch_bouding_box=True,
             within='tag:basis', compute_insn_id='prftch_basis')
 
-    kernel = loopy.join_inames(kernel, ["icopy0", "icopy1"],
-            "aux_local_id%d" % n_lids, within="id:prftch_basis")
-    kernel = loopy.split_iname(kernel, "aux_local_id%d" % n_lids,
+    kernel = loopy.split_iname(kernel, "icopy0",
             nthreads_per_cell * ncells_per_chunk, inner_tag="l.0",
             outer_tag="ilp",
             within="id:prftch_basis")
@@ -1663,7 +1662,8 @@ def generate_cuda_kernel(program):
 
     code = loopy.generate_code_v2(program).device_code()
     if kernel.name == configuration["cuda_jitmodule_name"]:
-        with open('danda.c', 'r') as f:
-            code = f.read()
+        pass
+        # with open('danda.c', 'r') as f:
+        #     code = f.read()
 
     return code, program, args_to_make_global
