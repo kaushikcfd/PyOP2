@@ -2063,7 +2063,8 @@ def basis_view(kernel, callables_table):
 
     batch_vars = (written_in_quad & read_in_basis)  # function evaluation at quadrature
     kernel = loopy.save_temporaries_in_loop(kernel, 'form_ip', batch_vars, within='iname:form_ip')
-    kernel = loopy.save_temporaries_in_loop(kernel, 'icell', batch_vars, within="not tag:init_shared")
+    kernel = loopy.save_temporaries_in_loop(kernel, 'icell', batch_vars,
+            within="not (tag:init_shared or id:copy_coords)")
 
     # }}}
 
@@ -2160,75 +2161,6 @@ def basis_view(kernel, callables_table):
 
     # }}}
 
-    # {{{ interpreting the domain as a cuboid
-
-    """
-    # Since we are not joining any inames, now.
-    # I think we can be fine without any of these time consuming steps.
-
-    new_space = kernel.domains[0].get_space()
-    new_dom = islpy.BasicSet.universe(new_space)
-    for stage in ['quad', 'basis']:
-        new_dom = new_dom.add_constraint(
-                islpy.Constraint.ineq_from_names(new_space, {
-                    'icell_%s' % stage: -1,
-                    1: ncells_per_chunk-1}))
-        new_dom = new_dom.add_constraint(
-                islpy.Constraint.ineq_from_names(new_space, {
-                    'icell_%s' % stage: 1}))
-
-        new_dom = new_dom.add_constraint(
-                islpy.Constraint.ineq_from_names(new_space, {
-                    'ichunk_%s' % stage:
-                    -(ncells_per_chunk),
-                    'icell_%s' % stage:
-                    -1,
-                    'start': -1, 'end': 1, 1: -1}))
-        new_dom = new_dom.add_constraint(
-                islpy.Constraint.ineq_from_names(new_space, {
-                    'ichunk_%s' % stage: 1}))
-
-    kernel = kernel.copy(domains=[new_dom]+kernel.domains[1:])
-    """
-
-    # }}}
-
-    # {{{ coalescing the entire domain forest
-
-    # Why coalsce? In order join inames we need them to be in the same iname forest
-
-    """
-    The same thing, we do not need this.
-
-    new_space = kernel.domains[0].get_space()
-    pos = kernel.domains[0].n_dim()
-    for dom in kernel.domains[1:]:
-        # product of all the spaces
-        for dim_name, (dim_type, _) in dom.get_space().get_var_dict().items():
-            assert dim_type == 3
-            new_space = new_space.add_dims(dim_type, 1)
-            new_space = new_space.set_dim_name(dim_type, pos, dim_name)
-            pos += 1
-
-    new_domain = islpy.BasicSet.universe(new_space)
-    for dom in kernel.domains[:]:
-        for constraint in dom.get_constraints():
-            if constraint.is_equality():
-                new_domain = (
-                        new_domain.add_constraint(
-                            islpy.Constraint.eq_from_names(new_space,
-                                constraint.get_coefficients_by_name())))
-            else:
-                new_domain = (
-                        new_domain.add_constraint(
-                            islpy.Constraint.ineq_from_names(new_space,
-                                constraint.get_coefficients_by_name())))
-
-    kernel = kernel.copy(domains=[new_domain])
-    """
-
-    # }}}
-
     # {{{ parallelizing the reductions
 
     from loopy.transform.convert_to_reduction import convert_to_reduction
@@ -2248,6 +2180,8 @@ def basis_view(kernel, callables_table):
     kernel = save_temporaries_in_loop(kernel, 'red_form_i_0', [], within='tag:quad_wrap_up')
 
     # }}}
+
+
 
     kernel = loopy.rename_iname(kernel, scatter_iname, basis_iname, existing_ok=True)
 
