@@ -246,8 +246,16 @@ class JITModule(base.JITModule):
         grid_y = 1
         if self.extruded:
             grid_y = glens[1]
+
+        grid_y = 1
+        if self.extruded:
+            grid_y = glens[1]
         grid = (int(evaluate(glens, parameters)[0]), grid_y)
-        block = (int(evaluate(llens, parameters)[0]), 1, 1)
+
+        block = tuple(int(k) for k in evaluate(llens, parameters))
+
+        block += (3-len(block))*(1, )
+        assert len(block) == 3
 
         return grid, block
 
@@ -411,7 +419,7 @@ class ParLoop(petsc_base.ParLoop):
             return
 
         if configuration["cuda_timer"]:
-            fun(part.offset, part.offset + part.size, *arglist)  # warm up
+            # fun(part.offset, part.offset + part.size, *arglist)  # warm up
             start = cuda_driver.Event()
             end = cuda_driver.Event()
             if configuration["cuda_timer_profile"]:
@@ -462,7 +470,9 @@ def generate_single_cell_wrapper(iterset, args, forward_args=(), kernel_name=Non
 
 
 def thread_transposition(kernel):
-    # This might need more looking into.
+    """
+    Algo. used in Knepley's paper, does not give good performance.
+    """
     nquad = int(loopy.symbolic.pw_aff_to_expr(
             kernel.get_iname_bounds('form_ip', constants_only=True).size))
     nbasis = int(loopy.symbolic.pw_aff_to_expr(
@@ -857,7 +867,7 @@ def scpt(kernel, extruded=False):
             args_to_make_global)
 
 
-def gcd_redn_tt(kernel):
+def gcd_tt(kernel):
 
     # {{{ reading info about the finite element
 
@@ -1797,16 +1807,12 @@ def tiled_gcd_tt(kernel, callables_table):
     return kernel, args_to_make_global
 
 
-def gcd_redn_cross_tt(kernel):
+def basis_view(kernel, callables_table):
 
     # {{{ reading info about the finite element
 
-    nquad = int(loopy.symbolic.pw_aff_to_expr(
-            kernel.get_iname_bounds('form_ip', constants_only=True).size))
     nbasis = int(loopy.symbolic.pw_aff_to_expr(
             kernel.get_iname_bounds('form_j', constants_only=True).size))
-
-    nthreads_per_cell = int(np.gcd(nquad, nbasis))
 
     # }}}
 
@@ -1814,15 +1820,14 @@ def gcd_redn_cross_tt(kernel):
 
     copy_consts_to_shared = True
     pack_consts_to_globals = True
-    tiled_access_to_the_vars = True
-    # we can tile only if variables are copied to shared memory
-    assert not tiled_access_to_the_vars or copy_consts_to_shared
-    ncells_per_chunk = 32
+    ncells_per_chunk = 16
+
+    nthreads_l0 = nbasis
+    nthreads_l1 = ncells_per_chunk
 
     # }}}
 
     args_to_make_global = []  # by default not imposing extra global args
-    n_lids = 0  # number of local ids, acts as a counter for the var_name_generation
 
     # {{{ remove noops
 
@@ -1851,8 +1856,6 @@ def gcd_redn_cross_tt(kernel):
 
     # {{{ feeding the constants into shared memory
 
-    consts_precomputed = set()
-
     if copy_consts_to_shared:
         # Add temporaries, instructions and domains for copying the constant variables
         from pymbolic.primitives import Variable, Subscript
@@ -1870,7 +1873,6 @@ def gcd_redn_cross_tt(kernel):
                 old_tv = tv.copy()
 
                 old_name = old_tv.name
-                consts_precomputed.add(old_name)
                 new_name = var_name_generator(based_on="const_"+tv.name)
 
                 inames = tuple(var_name_generator(based_on="icopy") for _
@@ -1904,15 +1906,90 @@ def gcd_redn_cross_tt(kernel):
 
         for inames in copy_inames:
             if len(inames) > 1:
-                iname_to_split = "aux_local_id%d" % n_lids
+                iname_to_split = var_name_generator(based_on="icopy_total")
                 kernel = loopy.join_inames(kernel, inames, iname_to_split)
             else:
                 iname_to_split = inames[0]
 
             kernel = loopy.split_iname(kernel, iname_to_split,
-                    nthreads_per_cell * ncells_per_chunk, inner_tag="l.0",
-                    outer_tag="ilp")
-            n_lids += 1
+                    nthreads_l0 * nthreads_l1, outer_tag="ilp")
+            kernel = loopy.split_iname(kernel, iname_to_split+"_inner",
+                    nthreads_l0 * nthreads_l1, outer_tag="l.1", inner_tag="l.0")
+
+    # }}}
+
+    # {{{ realizing CUDA blocks(i.e. chunk)
+
+    kernel = loopy.split_iname(kernel, "n", ncells_per_chunk, outer_iname="ichunk", inner_iname="icell")
+
+    # }}}
+
+    # {{{ organize for precomputes
+
+    from loopy.transform.batch import save_temporaries_in_loop
+
+    kernel = save_temporaries_in_loop(kernel, 'icell', ['t1'], within='reads:t1 or writes:t1')
+
+    written_count = dict((written_var, 0) for written_var in
+            kernel.get_written_variables())
+    for insn in kernel.instructions:
+        if isinstance(insn.assignee, Variable):
+            written_count[insn.assignee.name] += 1
+        elif isinstance(insn.assignee, Subscript):
+            written_count[insn.assignee.aggregate.name] += 1
+
+    from loopy.transform.data import remove_unused_axes_in_temporaries
+    kernel = remove_unused_axes_in_temporaries(kernel)
+
+    args_to_be_interpreted_as_substs = set()
+
+    for insn in kernel.instructions:
+        if frozenset(['gather']) & insn.tags:
+            if isinstance(insn.assignee, Subscript) and (
+                    written_count[insn.assignee.aggregate.name] == 1):
+                args_to_be_interpreted_as_substs.add(
+                        insn.assignee.aggregate.name)
+
+    substs_to_insns = dict((var_name, []) for var_name in args_to_be_interpreted_as_substs)
+
+    for insn in kernel.instructions:
+        precompted_args_referred_in_insn = (insn.read_dependency_names() & args_to_be_interpreted_as_substs)
+        for arg_name in precompted_args_referred_in_insn:
+            substs_to_insns[arg_name].append(insn.id)
+
+    for arg_name in args_to_be_interpreted_as_substs:
+        kernel = loopy.assignment_to_subst(kernel, arg_name)
+
+    # }}}
+
+    # {{{ precompute the coordinates.
+
+    from loopy.transform.precompute import precompute_for_single_kernel
+    rule = kernel.substitutions['t1_subst']
+    vng = kernel.get_var_name_generator()
+
+    precompute_inames = tuple(vng(based_on='icopy') for _ in rule.arguments)
+
+    kernel = precompute_for_single_kernel(kernel, callables_table,
+            subst_use='t1_subst',
+            sweep_inames=["icell"],
+            precompute_outer_inames=frozenset(["ichunk"]),
+            temporary_address_space=loopy.AddressSpace.LOCAL,
+            precompute_inames=precompute_inames,
+            temporary_name='t1_temp',
+            compute_insn_id='copy_coords',
+            default_tag=None)
+
+    if len(precompute_inames) > 1:
+        iname_to_split = vng(based_on="icopy_total")
+        kernel = loopy.join_inames(kernel, precompute_inames, iname_to_split)
+    else:
+        iname_to_split = precompute_inames[0]
+
+    kernel = loopy.split_iname(kernel, iname_to_split,
+            nthreads_l0 * nthreads_l1, outer_tag="ilp")
+    kernel = loopy.split_iname(kernel, iname_to_split+"_inner",
+            nthreads_l0 * nthreads_l1, outer_tag="l.1", inner_tag="l.0")
 
     # }}}
 
@@ -1931,12 +2008,6 @@ def gcd_redn_cross_tt(kernel):
                 kernel.temporary_variables.values())
 
         kernel = kernel.copy(temporary_variables=new_temps)
-
-    # }}}
-
-    # {{{ realizing CUDA blocks(i.e. chunk)
-
-    kernel = loopy.split_iname(kernel, "n", ncells_per_chunk, outer_iname="ichunk", inner_iname="icell")
 
     # }}}
 
@@ -1998,6 +2069,10 @@ def gcd_redn_cross_tt(kernel):
 
     # {{{ duplicating inames
 
+    """
+    # Turning off these for now.
+    # I do not see any prospect in it.
+
     kernel = loopy.duplicate_inames(kernel, ["ichunk", "icell"],
             new_inames=["ichunk_quad", "icell_quad"],
             within="not (tag:basis or tag:scatter)", tags={"ichunk": "g.0"})
@@ -2005,6 +2080,7 @@ def gcd_redn_cross_tt(kernel):
     kernel = loopy.duplicate_inames(kernel, ["ichunk", "icell"],
             new_inames=["ichunk_basis", "icell_basis"],
             within="tag:basis or tag:scatter", tags={"ichunk": "g.0"})
+    """
 
     kernel = loopy.duplicate_inames(kernel, ["form_ip"],
             new_inames=["form_ip_quad"], within="tag:quadrature")
@@ -2013,8 +2089,9 @@ def gcd_redn_cross_tt(kernel):
 
     kernel = loopy.remove_unused_inames(kernel)
 
-    # All these inames are split in some way and should not be used in instructions
-    assert not (frozenset(["icell", "n", "ichunk"]) & kernel.all_inames())
+    # check that all the instructions either use 'form_ip_quad' or
+    # 'form_ip_basis'
+    assert not (frozenset(["form_ip"]) & kernel.all_inames())
 
     # }}}
 
@@ -2085,6 +2162,10 @@ def gcd_redn_cross_tt(kernel):
 
     # {{{ interpreting the domain as a cuboid
 
+    """
+    # Since we are not joining any inames, now.
+    # I think we can be fine without any of these time consuming steps.
+
     new_space = kernel.domains[0].get_space()
     new_dom = islpy.BasicSet.universe(new_space)
     for stage in ['quad', 'basis']:
@@ -2108,12 +2189,16 @@ def gcd_redn_cross_tt(kernel):
                     'ichunk_%s' % stage: 1}))
 
     kernel = kernel.copy(domains=[new_dom]+kernel.domains[1:])
+    """
 
     # }}}
 
     # {{{ coalescing the entire domain forest
 
     # Why coalsce? In order join inames we need them to be in the same iname forest
+
+    """
+    The same thing, we do not need this.
 
     new_space = kernel.domains[0].get_space()
     pos = kernel.domains[0].n_dim()
@@ -2140,51 +2225,42 @@ def gcd_redn_cross_tt(kernel):
                                 constraint.get_coefficients_by_name())))
 
     kernel = kernel.copy(domains=[new_domain])
+    """
 
     # }}}
 
-    # {{{ re-distributing the quadrature evaluation work
+    # {{{ parallelizing the reductions
 
-    kernel = loopy.split_iname(kernel, "form_ip_quad", nthreads_per_cell)
-    kernel = loopy.join_inames(kernel, ["icell_quad", "form_ip_quad_inner"],
-            "local_id%d" % n_lids, within="tag:quadrature or tag:gather")
-    n_lids += 1
+    from loopy.transform.convert_to_reduction import convert_to_reduction
+    kernel = convert_to_reduction(kernel, ['form_insn_14', 'form_insn_15'], ('form_i', ))
+    kernel = loopy.remove_instructions(kernel, set(['form_insn_12']))
+    kernel = loopy.remove_instructions(kernel, set(['form_insn_13']))
+
+    # kernel = loopy.duplicate_inames(kernel, ['form_i',], new_inames=['form_i_0',], within='id:form_insn_15')
+    # kernel = loopy.save_temporaries_in_loop(kernel, 'form_ip_quad', ['form_t16', 'form_t17'], within='iname:form_ip_quad')
+    # kernel = loopy.save_temporaries_in_loop(kernel, 'icell_quad', ['form_t16', 'form_t17'], within='iname:form_ip_quad')
+    # kernel = loopy.duplicate_inames(kernel, ('form_ip_quad', ), within='tag:quad_redn', new_inames=['form_ip_quad_redn', ])
+
+    kernel = loopy.tag_inames(kernel, "form_i:l.1")
+    kernel = loopy.tag_inames(kernel, "icell:l.0")
+    from loopy.preprocess import realize_reduction_for_single_kernel
+    kernel = realize_reduction_for_single_kernel(kernel, callables_table)
+    kernel = save_temporaries_in_loop(kernel, 'red_form_i_0', [], within='tag:quad_wrap_up')
 
     # }}}
 
-    # {{{ re-distributing the basis coeffs evaluation work
+    kernel = loopy.rename_iname(kernel, scatter_iname, basis_iname, existing_ok=True)
 
-    kernel = loopy.split_iname(kernel, basis_iname, nthreads_per_cell, within='tag:basis')
-    kernel = loopy.join_inames(kernel, ["icell_basis", basis_iname+"_inner"], "local_id%d" % n_lids, within='tag:basis')
-
-    kernel = loopy.split_iname(kernel, scatter_iname, nthreads_per_cell, within="tag:scatter")
-    kernel = loopy.join_inames(kernel, ["icell_basis", scatter_iname+"_inner"], "local_id%d" % (n_lids+1), within="tag:scatter")
-
-    n_lids += 2
-
-    kernel = loopy.rename_iname(kernel, scatter_iname+'_outer', basis_iname+'_outer',
-            within='tag:scatter', existing_ok=True)
-
-    from loopy.transform.make_scalar import (
-            make_scalar, remove_invariant_inames)
+    from loopy.transform.make_scalar import make_scalar
     # FIXME: generalize this
     kernel = make_scalar(kernel, 't0')
-    kernel = loopy.save_temporaries_in_loop(kernel, basis_iname+"_outer",
-            ['t0'], within="tag:basis or tag:scatter")
-    kernel = remove_invariant_inames(kernel)
+    kernel = loopy.rename_iname(kernel, 'i0', basis_iname, existing_ok=True)
 
-    # }}}
+    kernel = loopy.tag_inames(kernel, "ichunk:g.0, form_j:l.1")
 
-    iname_tags = {
-        "ichunk_quad":      "g.0",
-        "ichunk_basis":     "g.0",
-        }
-    for i in range(n_lids):
-        iname_tags["local_id%d" % i] = "l.0"
-        iname_tags["aux_local_id%d_outer" % i] = "ilp"
-
-    kernel = loopy.tag_inames(kernel, iname_tags, ignore_nonexistent=True)
     kernel = loopy.remove_unused_inames(kernel).copy(loop_priority=frozenset())
+    print(kernel)
+    1/0
 
     return kernel, args_to_make_global
 
@@ -2226,7 +2302,7 @@ def generate_cuda_kernel(program, extruded=False):
         # kernel = thread_transposition(kernel)
         # kernel, args_to_make_global = scpt(kernel, extruded)
         # kernel, args_to_make_global = gcd_tt(kernel)
-        kernel, args_to_make_global = gcd_redn_cross_tt(kernel)
+        kernel, args_to_make_global = basis_view(kernel, program.callables_table)
         # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
     else:
         # batch cells into groups
@@ -2250,7 +2326,9 @@ def generate_cuda_kernel(program, extruded=False):
         code = code.replace("inline void pyop2_kernel_uniform_extrusion", "__device__ inline void pyop2_kernel_uniform_extrusion")
 
     if program.name == configuration["cuda_jitmodule_name"]:
-        with open('current_kernel.cu', 'w') as f:
-            f.write(code)
+        with open('current_kernel.cu', 'r') as f:
+            code = f.read()
+            # f.write(code)
+
 
     return code, program, args_to_make_global
