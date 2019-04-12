@@ -1914,7 +1914,7 @@ def basis_view(kernel, callables_table):
             kernel = loopy.split_iname(kernel, iname_to_split,
                     nthreads_l0 * nthreads_l1, outer_tag="ilp")
             kernel = loopy.split_iname(kernel, iname_to_split+"_inner",
-                    nthreads_l0 * nthreads_l1, outer_tag="l.1", inner_tag="l.0")
+                    nthreads_l1, outer_tag="l.1", inner_tag="l.0")
 
     # }}}
 
@@ -1989,7 +1989,7 @@ def basis_view(kernel, callables_table):
     kernel = loopy.split_iname(kernel, iname_to_split,
             nthreads_l0 * nthreads_l1, outer_tag="ilp")
     kernel = loopy.split_iname(kernel, iname_to_split+"_inner",
-            nthreads_l0 * nthreads_l1, outer_tag="l.1", inner_tag="l.0")
+            nthreads_l1, outer_tag="l.1", inner_tag="l.0")
 
     # }}}
 
@@ -2167,21 +2167,37 @@ def basis_view(kernel, callables_table):
     kernel = convert_to_reduction(kernel, ['form_insn_14', 'form_insn_15'], ('form_i', ))
     kernel = loopy.remove_instructions(kernel, set(['form_insn_12']))
     kernel = loopy.remove_instructions(kernel, set(['form_insn_13']))
+    new_form_insn_15 = kernel.id_to_insn['form_insn_15'].copy(
+            depends_on=frozenset())
+    new_insns = [new_form_insn_15 if insn.id == 'form_insn_15' else insn for
+            insn in kernel.instructions]
+    kernel = kernel.copy(instructions=new_insns)
+    kernel = loopy.add_dependency(kernel, "id:form_insn_15", "id:form_insn_11")
+    kernel = loopy.add_dependency(kernel, "id:form_insn_16", "id:form_insn_14")
 
     # kernel = loopy.duplicate_inames(kernel, ['form_i',], new_inames=['form_i_0',], within='id:form_insn_15')
     # kernel = loopy.save_temporaries_in_loop(kernel, 'form_ip_quad', ['form_t16', 'form_t17'], within='iname:form_ip_quad')
     # kernel = loopy.save_temporaries_in_loop(kernel, 'icell_quad', ['form_t16', 'form_t17'], within='iname:form_ip_quad')
     # kernel = loopy.duplicate_inames(kernel, ('form_ip_quad', ), within='tag:quad_redn', new_inames=['form_ip_quad_redn', ])
 
-    kernel = loopy.tag_inames(kernel, "form_i:l.1")
-    kernel = loopy.tag_inames(kernel, "icell:l.0")
+    kernel = loopy.tag_inames(kernel, "form_i:l.0")
+    kernel = loopy.tag_inames(kernel, "icell:l.1")
     from loopy.preprocess import realize_reduction_for_single_kernel
     kernel = realize_reduction_for_single_kernel(kernel, callables_table)
-    kernel = save_temporaries_in_loop(kernel, 'red_form_i_0', [], within='tag:quad_wrap_up')
+    # add the dependencies over here.
+    # first get the name of the instructions.
+
+    # add dependencies to get 3 barriers
+    kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_init_* or id:red_init_neutral_* or id:red_transfer_*")
+    kernel = loopy.add_dependency(kernel, "id:red_stage_1_*", "id:red_stage_0_*")
+    kernel = loopy.add_dependency(kernel, "id:red_stage_2_*", "id:red_stage_1_*")
+
+    kernel = loopy.assignment_to_subst(kernel, 'form_t16')
+    kernel = loopy.assignment_to_subst(kernel, 'form_t17')
+
+    kernel = save_temporaries_in_loop(kernel, 'red_form_i_s2_1', [], within='tag:quad_wrap_up')
 
     # }}}
-
-
 
     kernel = loopy.rename_iname(kernel, scatter_iname, basis_iname, existing_ok=True)
 
@@ -2190,11 +2206,9 @@ def basis_view(kernel, callables_table):
     kernel = make_scalar(kernel, 't0')
     kernel = loopy.rename_iname(kernel, 'i0', basis_iname, existing_ok=True)
 
-    kernel = loopy.tag_inames(kernel, "ichunk:g.0, form_j:l.1")
+    kernel = loopy.tag_inames(kernel, "ichunk:g.0, form_j:l.0")
 
     kernel = loopy.remove_unused_inames(kernel).copy(loop_priority=frozenset())
-    print(kernel)
-    1/0
 
     return kernel, args_to_make_global
 
@@ -2260,9 +2274,11 @@ def generate_cuda_kernel(program, extruded=False):
         code = code.replace("inline void pyop2_kernel_uniform_extrusion", "__device__ inline void pyop2_kernel_uniform_extrusion")
 
     if program.name == configuration["cuda_jitmodule_name"]:
-        with open('current_kernel.cu', 'r') as f:
-            code = f.read()
-            # f.write(code)
-
+        print(code)
+        1/0
+        with open('current_kernel.cu', 'w') as f:
+            # code = f.read()
+            f.write(code)
+        1/0
 
     return code, program, args_to_make_global
