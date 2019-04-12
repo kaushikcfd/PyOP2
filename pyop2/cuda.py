@@ -1814,9 +1814,15 @@ def basis_view(kernel, callables_table):
     nbasis = int(loopy.symbolic.pw_aff_to_expr(
             kernel.get_iname_bounds('form_j', constants_only=True).size))
 
+    assert nbasis == 6
+
     # }}}
 
     # {{{ performance params
+
+    # Since each thread accesses an element of the constant matrix n_quad
+    # times, therefore it is better to "cache" the matrix in shared memory till
+    # the point it does not decrease the occupancy by much.
 
     copy_consts_to_shared = True
     pack_consts_to_globals = True
@@ -1914,7 +1920,7 @@ def basis_view(kernel, callables_table):
             kernel = loopy.split_iname(kernel, iname_to_split,
                     nthreads_l0 * nthreads_l1, outer_tag="ilp")
             kernel = loopy.split_iname(kernel, iname_to_split+"_inner",
-                    nthreads_l1, outer_tag="l.1", inner_tag="l.0")
+                    nthreads_l0, outer_tag="l.1", inner_tag="l.0")
 
     # }}}
 
@@ -1989,7 +1995,7 @@ def basis_view(kernel, callables_table):
     kernel = loopy.split_iname(kernel, iname_to_split,
             nthreads_l0 * nthreads_l1, outer_tag="ilp")
     kernel = loopy.split_iname(kernel, iname_to_split+"_inner",
-            nthreads_l1, outer_tag="l.1", inner_tag="l.0")
+            nthreads_l0, outer_tag="l.1", inner_tag="l.0")
 
     # }}}
 
@@ -2209,6 +2215,10 @@ def basis_view(kernel, callables_table):
     kernel = loopy.tag_inames(kernel, "ichunk:g.0, form_j:l.0")
 
     kernel = loopy.remove_unused_inames(kernel).copy(loop_priority=frozenset())
+    new_temps = dict((tv.name,
+        tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv.name in batch_vars
+        else (tv.name, tv) for tv in kernel.temporary_variables.values())
+    kernel = kernel.copy(temporary_variables=new_temps)
 
     return kernel, args_to_make_global
 
@@ -2248,9 +2258,9 @@ def generate_cuda_kernel(program, extruded=False):
     if kernel.name == configuration["cuda_jitmodule_name"]:
         # choose the preferred algorithm here
         # kernel = thread_transposition(kernel)
-        # kernel, args_to_make_global = scpt(kernel, extruded)
+        kernel, args_to_make_global = scpt(kernel, extruded)
         # kernel, args_to_make_global = gcd_tt(kernel)
-        kernel, args_to_make_global = basis_view(kernel, program.callables_table)
+        # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
         # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
     else:
         # batch cells into groups
@@ -2274,11 +2284,8 @@ def generate_cuda_kernel(program, extruded=False):
         code = code.replace("inline void pyop2_kernel_uniform_extrusion", "__device__ inline void pyop2_kernel_uniform_extrusion")
 
     if program.name == configuration["cuda_jitmodule_name"]:
-        print(code)
-        1/0
         with open('current_kernel.cu', 'w') as f:
             # code = f.read()
             f.write(code)
-        1/0
 
     return code, program, args_to_make_global
