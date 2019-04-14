@@ -2189,7 +2189,9 @@ def basis_view(kernel, callables_table):
     kernel = loopy.tag_inames(kernel, "form_i:l.0")
     kernel = loopy.tag_inames(kernel, "icell:l.1")
     from loopy.preprocess import realize_reduction_for_single_kernel
+    kernel = loopy.prioritize_loops(kernel, "form_i, form_ip_quad")
     kernel = realize_reduction_for_single_kernel(kernel, callables_table)
+
     # add the dependencies over here.
     # first get the name of the instructions.
 
@@ -2219,6 +2221,9 @@ def basis_view(kernel, callables_table):
         tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv.name in batch_vars
         else (tv.name, tv) for tv in kernel.temporary_variables.values())
     kernel = kernel.copy(temporary_variables=new_temps)
+    kernel = loopy.remove_instructions(kernel, set(['red_init_form_i_form_insn_14', 'red_init_form_i_form_insn_15']))
+    kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i')
+    kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_0')
 
     return kernel, args_to_make_global
 
@@ -2257,11 +2262,10 @@ def generate_cuda_kernel(program, extruded=False):
 
     if kernel.name == configuration["cuda_jitmodule_name"]:
         # choose the preferred algorithm here
-        # kernel = thread_transposition(kernel)
-        kernel, args_to_make_global = scpt(kernel, extruded)
+        # kernel, args_to_make_global = scpt(kernel, extruded)
         # kernel, args_to_make_global = gcd_tt(kernel)
         # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
-        # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
+        kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
     else:
         # batch cells into groups
         # essentially, each thread computes unroll_size elements, each block computes unroll_size*block_size elements
@@ -2284,8 +2288,9 @@ def generate_cuda_kernel(program, extruded=False):
         code = code.replace("inline void pyop2_kernel_uniform_extrusion", "__device__ inline void pyop2_kernel_uniform_extrusion")
 
     if program.name == configuration["cuda_jitmodule_name"]:
-        with open('current_kernel.cu', 'w') as f:
-            # code = f.read()
-            f.write(code)
+        pass
+        # with open('current_kernel.cu', 'w') as f:
+        #     # code = f.read()
+        #     f.write(code)
 
     return code, program, args_to_make_global
