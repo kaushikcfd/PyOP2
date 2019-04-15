@@ -277,6 +277,26 @@ class JITModule(base.JITModule):
     def __call__(self, *args):
         grid, block = self.grid_size(args[0], args[1])
         extra_global_args = self.get_args_marked_for_globals
+        # FIXME: WARNING Doing all these micro-optimizations for P2-Poisson
+        # only.
+        # Will generalize it later.
+        import pycuda.driver as cuda
+        dev_map_basis, dev_map_coords = args[-2:]
+        map_basis = np.empty(dtype=self.processed_program.args[-2].dtype, shape=(args[1]-args[0], 6))
+        map_coords = np.empty(dtype=self.processed_program.args[-1].dtype, shape=(args[1]-args[0], 3))
+        cuda.memcpy_dtoh(map_basis, dev_map_basis)
+        cuda.memcpy_dtoh(map_coords, dev_map_coords)
+
+        basis_shape = (np.max(map_basis), )
+        coords_shape = (np.max(map_coords), 2)
+
+        dev_out_basis, dev_coords, dev_in_basis = args[2:5]
+
+        out_basis = cuda.from_device(dev_out_basis, shape=basis_shape, dtype=np.float64)
+        in_basis = cuda.from_device(dev_in_basis, shape=basis_shape, dtype=np.float64)
+        coords = cuda.from_device(dev_coords, shape=coords_shape, dtype=np.float64)
+
+        import pudb; pu.db
         return self._fun.prepared_call(grid, block, *(args+extra_global_args))
 
     @cached_property
@@ -2262,10 +2282,10 @@ def generate_cuda_kernel(program, extruded=False):
 
     if kernel.name == configuration["cuda_jitmodule_name"]:
         # choose the preferred algorithm here
-        # kernel, args_to_make_global = scpt(kernel, extruded)
+        kernel, args_to_make_global = scpt(kernel, extruded)
         # kernel, args_to_make_global = gcd_tt(kernel)
         # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
-        kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
+        # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
     else:
         # batch cells into groups
         # essentially, each thread computes unroll_size elements, each block computes unroll_size*block_size elements
