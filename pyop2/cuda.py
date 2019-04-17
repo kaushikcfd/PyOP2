@@ -73,7 +73,6 @@ from pytools import memoize_method
 
 
 class Map(Map):
-
     @cached_property
     def device_handle(self):
         m_gpu = cuda_driver.mem_alloc(int(self.values.nbytes))
@@ -273,10 +272,8 @@ class JITModule(base.JITModule):
 
         return const_args_as_globals
 
-    @collective
-    def __call__(self, *args):
-        grid, block = self.grid_size(args[0], args[1])
-        extra_global_args = self.get_args_marked_for_globals
+    @memoize_method
+    def renumber_args(self, args):
         # FIXME: WARNING Doing all these micro-optimizations for P2-Poisson
         # only.
         # Will generalize it later.
@@ -284,19 +281,57 @@ class JITModule(base.JITModule):
         dev_map_basis, dev_map_coords = args[-2:]
         map_basis = np.empty(dtype=self.processed_program.args[-2].dtype, shape=(args[1]-args[0], 6))
         map_coords = np.empty(dtype=self.processed_program.args[-1].dtype, shape=(args[1]-args[0], 3))
-        cuda.memcpy_dtoh(map_basis, dev_map_basis)
-        cuda.memcpy_dtoh(map_coords, dev_map_coords)
+        cuda.memcpy_dtoh(dest=map_basis, src=dev_map_basis)
+        cuda.memcpy_dtoh(dest=map_coords, src=dev_map_coords)
 
-        basis_shape = (np.max(map_basis), )
-        coords_shape = (np.max(map_coords), 2)
+        basis_shape = (np.max(map_basis)+1, )
+        coords_shape = (np.max(map_coords)+1, 2)
 
         dev_out_basis, dev_coords, dev_in_basis = args[2:5]
 
-        out_basis = cuda.from_device(dev_out_basis, shape=basis_shape, dtype=np.float64)
-        in_basis = cuda.from_device(dev_in_basis, shape=basis_shape, dtype=np.float64)
-        coords = cuda.from_device(dev_coords, shape=coords_shape, dtype=np.float64)
+        out_basis = np.empty(shape=basis_shape, dtype=np.float64)
+        in_basis = np.empty(shape=basis_shape, dtype=np.float64)
+        coords = np.empty(shape=coords_shape, dtype=np.float64)
 
-        import pudb; pu.db
+        cuda.memcpy_dtoh(dest=out_basis, src=dev_out_basis)
+        cuda.memcpy_dtoh(dest=in_basis, src=dev_in_basis)
+        cuda.memcpy_dtoh(dest=coords, src=dev_coords)
+
+        np.set_printoptions(threshold=np.inf, linewidth=1000)
+
+        alrady_seen = dict()  # old to new
+
+        print(map_basis.shape)
+        1/0
+        map_basis = map_basis.flatten()
+        map_basis = map_basis.reshape((args[1]*6) // 32, 32)
+        map_basis = map_basis // 4
+        accesses = []
+        for warp in map_basis:
+            accesses.append(len(np.unique(warp)))
+
+        accesses = np.array(accesses)
+        print(len(accesses))
+        print((args[1]*6) // 32)
+        print(np.average(accesses))
+        1/0
+
+        # CONVERTING BACK TO DEVICE MEMORIES.
+        cuda.memcpy_htod(src=out_basis, dest=dev_out_basis)
+        cuda.memcpy_htod(src=coords, dest=dev_coords)
+        cuda.memcpy_htod(src=in_basis, dest=dev_in_basis)
+        cuda.memcpy_htod(src=map_basis, dest=dev_map_basis)
+        cuda.memcpy_htod(src=map_coords, dest=dev_map_coords)
+
+        return args[0], args[1], dev_out_basis, dev_coords, dev_in_basis, dev_map_basis, dev_map_coords
+
+    @collective
+    def __call__(self, *args):
+        grid, block = self.grid_size(args[0], args[1])
+        extra_global_args = self.get_args_marked_for_globals
+
+        # args = self.renumber_args(args)
+
         return self._fun.prepared_call(grid, block, *(args+extra_global_args))
 
     @cached_property
