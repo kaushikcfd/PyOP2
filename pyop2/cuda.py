@@ -2240,8 +2240,8 @@ def basis_view(kernel, callables_table):
         return insn.copy(depends_on=frozenset(new_depends_on))
 
     kernel = loopy.add_dependency(kernel, "tag:quad_redn", "tag:jacobi_eval")
-    kernel = loopy.add_dependency(kernel, "tag:basis", "tag:quad_redn")
-
+    kernel = loopy.add_dependency(kernel, "tag:quad_wrap_up", "tag:quad_redn")
+    kernel = loopy.map_instructions(kernel, "tag:quad_redn", _remove_dependency_between_quad_redn)
     kernel = loopy.tag_inames(kernel, "form_i:l.0, icell:l.1")
     reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
             if 'quad_redn' in insn.tags)
@@ -2281,9 +2281,9 @@ def basis_view(kernel, callables_table):
         tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv.name in batch_vars
         else (tv.name, tv) for tv in kernel.temporary_variables.values())
     kernel = kernel.copy(temporary_variables=new_temps)
-    kernel = loopy.remove_instructions(kernel, set(['red_init_form_i_form_insn_14', 'red_init_form_i_form_insn_15']))
-    kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i')
-    kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_0')
+    # kernel = loopy.remove_instructions(kernel, set(['red_init_form_i_form_insn_14', 'red_init_form_i_form_insn_15']))
+    # kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i')
+    # kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_0')
 
     return kernel, args_to_make_global
 
