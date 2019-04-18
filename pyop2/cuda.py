@@ -2225,26 +2225,27 @@ def basis_view(kernel, callables_table):
     # {{{ parallelizing the reductions
 
     from loopy.transform.convert_to_reduction import convert_to_reduction
-    kernel = convert_to_reduction(kernel, ['form_insn_14', 'form_insn_15'], ('form_i', ))
-    kernel = loopy.remove_instructions(kernel, set(['form_insn_12']))
-    kernel = loopy.remove_instructions(kernel, set(['form_insn_13']))
-    new_form_insn_15 = kernel.id_to_insn['form_insn_15'].copy(
-            depends_on=frozenset())
-    new_insns = [new_form_insn_15 if insn.id == 'form_insn_15' else insn for
-            insn in kernel.instructions]
-    kernel = kernel.copy(instructions=new_insns)
-    kernel = loopy.add_dependency(kernel, "id:form_insn_15", "id:form_insn_11")
-    kernel = loopy.add_dependency(kernel, "id:form_insn_16", "id:form_insn_14")
+    kernel = convert_to_reduction(kernel, 'tag:quad_redn', ('form_i', ))
+    quad_init_instructions = [insn.id for insn in kernel.instructions if 'quad_init' in insn.tags]
 
-    # kernel = loopy.duplicate_inames(kernel, ['form_i',], new_inames=['form_i_0',], within='id:form_insn_15')
-    # kernel = loopy.save_temporaries_in_loop(kernel, 'form_ip_quad', ['form_t16', 'form_t17'], within='iname:form_ip_quad')
-    # kernel = loopy.save_temporaries_in_loop(kernel, 'icell_quad', ['form_t16', 'form_t17'], within='iname:form_ip_quad')
-    # kernel = loopy.duplicate_inames(kernel, ('form_ip_quad', ), within='tag:quad_redn', new_inames=['form_ip_quad_redn', ])
+    for insn_id in quad_init_instructions:
+        kernel = loopy.remove_instructions(kernel, set([insn_id]))
 
-    kernel = loopy.tag_inames(kernel, "form_i:l.0")
-    kernel = loopy.tag_inames(kernel, "icell:l.1")
+    def _remove_dependency_between_quad_redn(insn):
+        new_depends_on = []
+        for insn_id in insn.depends_on:
+            if "quad_redn" not in kernel.id_to_insn[insn_id].tags:
+                new_depends_on.append(insn_id)
+
+        return insn.copy(depends_on=frozenset(new_depends_on))
+
+    kernel = loopy.add_dependency(kernel, "tag:quad_redn", "tag:jacobi_eval")
+    kernel = loopy.add_dependency(kernel, "tag:basis", "tag:quad_redn")
+
+    kernel = loopy.tag_inames(kernel, "form_i:l.0, icell:l.1")
+    reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
+            if 'quad_redn' in insn.tags)
     from loopy.preprocess import realize_reduction_for_single_kernel
-    kernel = loopy.prioritize_loops(kernel, "form_i, form_ip_quad")
     kernel = realize_reduction_for_single_kernel(kernel, callables_table)
 
     # add the dependencies over here.
@@ -2252,13 +2253,17 @@ def basis_view(kernel, callables_table):
 
     # add dependencies to get 3 barriers
     kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_init_* or id:red_init_neutral_* or id:red_transfer_*")
-    kernel = loopy.add_dependency(kernel, "id:red_stage_1_*", "id:red_stage_0_*")
-    kernel = loopy.add_dependency(kernel, "id:red_stage_2_*", "id:red_stage_1_*")
+    for i in range(1, int(np.ceil(np.log2(nbasis)))):
+        within = loopy.match.parse_match("id:red_stage_%d_*" % i)
+        assert any(within(kernel, insn) for insn in kernel.instructions)
+        kernel = loopy.add_dependency(kernel, "id:red_stage_%d_*" % i, "id:red_stage_%d_*" % (i-1))
 
-    kernel = loopy.assignment_to_subst(kernel, 'form_t16')
-    kernel = loopy.assignment_to_subst(kernel, 'form_t17')
+    for assignee in reduction_assignees:
+        kernel = loopy.assignment_to_subst(kernel, assignee.name)
 
-    kernel = save_temporaries_in_loop(kernel, 'red_form_i_s2_1', [], within='tag:quad_wrap_up')
+    # baically all I need to do is just boost the iname within the
+    # instructions. But there is not such instruction for it.
+    kernel = save_temporaries_in_loop(kernel, 'red_form_i_s%d_0' % int(np.floor(np.log2(nbasis))), [], within='tag:quad_wrap_up')
 
     # }}}
 
@@ -2317,9 +2322,9 @@ def generate_cuda_kernel(program, extruded=False):
 
     if kernel.name == configuration["cuda_jitmodule_name"]:
         # choose the preferred algorithm here
-        kernel, args_to_make_global = scpt(kernel, extruded)
+        # kernel, args_to_make_global = scpt(kernel, extruded)
         # kernel, args_to_make_global = gcd_tt(kernel)
-        # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
+        kernel, args_to_make_global = basis_view(kernel, program.callables_table)
         # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
     else:
         # batch cells into groups
