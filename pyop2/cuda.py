@@ -2290,10 +2290,8 @@ def quad_view(kernel, callables_table):
 
     # {{{ storing values between the stages
 
-    batch_vars = (written_in_quad & read_in_basis)  # function evaluation at quadrature
-    kernel = loopy.save_temporaries_in_loop(kernel, 'form_ip', batch_vars, within='iname:form_ip')
-    kernel = loopy.save_temporaries_in_loop(kernel, 'icell', batch_vars,
-            within="not (tag:init_shared or id:copy_t1 or id:copy_t2)")
+    kernel = loopy.save_temporaries_in_loop(kernel, 'icell', frozenset(['t0']),
+            within="not (tag:init_shared or id:copy_t1)")
 
     # }}}
 
@@ -2397,8 +2395,8 @@ def quad_view(kernel, callables_table):
     kernel = loopy.map_instructions(kernel, "tag:basis_redn",
             _remove_dependency_between_basis_redn)
     kernel = loopy.tag_inames(kernel, "form_ip_basis:l.0, icell:l.1")
-    reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
-            if 'basis_redn' in insn.tags)
+    # reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
+    #         if 'basis_redn' in insn.tags)
     from loopy.preprocess import realize_reduction_for_single_kernel
     kernel = realize_reduction_for_single_kernel(kernel, callables_table)
 
@@ -2412,9 +2410,6 @@ def quad_view(kernel, callables_table):
         assert any(within(kernel, insn) for insn in kernel.instructions)
         kernel = loopy.add_dependency(kernel, "id:red_stage_%d_*" % i, "id:red_stage_%d_*" % (i-1))
 
-    for assignee in reduction_assignees:
-        kernel = loopy.assignment_to_subst(kernel, assignee.aggregate.name)
-
     # }}}
 
     kernel = loopy.split_iname(kernel, scatter_iname,
@@ -2423,7 +2418,7 @@ def quad_view(kernel, callables_table):
 
     kernel = loopy.remove_unused_inames(kernel).copy(loop_priority=frozenset())
     new_temps = dict((tv.name,
-        tv.copy(address_space=loopy.AddressSpace.LOCAL)) if tv.name in batch_vars
+        tv.copy(address_space=loopy.AddressSpace.LOCAL)) if (tv.name == 't0')
         else (tv.name, tv) for tv in kernel.temporary_variables.values())
     kernel = kernel.copy(temporary_variables=new_temps)
 
@@ -2466,9 +2461,9 @@ def generate_cuda_kernel(program, extruded=False):
         # choose the preferred algorithm here
         # kernel, args_to_make_global = scpt(kernel, extruded)
         # kernel, args_to_make_global = gcd_tt(kernel)
+        # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
         # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
         kernel, args_to_make_global = quad_view(kernel, program.callables_table)
-        # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
     else:
         # batch cells into groups
         # essentially, each thread computes unroll_size elements, each block computes unroll_size*block_size elements
@@ -2491,6 +2486,7 @@ def generate_cuda_kernel(program, extruded=False):
         code = code.replace("inline void pyop2_kernel_uniform_extrusion", "__device__ inline void pyop2_kernel_uniform_extrusion")
 
     if program.name == configuration["cuda_jitmodule_name"]:
+        # print(code)
         pass
         # with open('current_kernel.cu', 'w') as f:
         #     # code = f.read()
