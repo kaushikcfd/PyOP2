@@ -2754,7 +2754,7 @@ class Map(object):
         self.comm = toset.comm
         self._arity = arity
         self._values = verify_reshape(values, IntType,
-                                      (iterset.total_size, arity),
+                                      (arity, iterset.total_size),
                                       allow_none=True)
         self.shape = (iterset.total_size, arity)
         self._name = name or "map_%d" % Map._globalcount

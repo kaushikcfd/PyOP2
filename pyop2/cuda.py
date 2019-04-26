@@ -2415,6 +2415,16 @@ def quad_view(kernel, callables_table):
     return kernel, args_to_make_global
 
 
+def transpose_maps(kernel):
+    from loopy.kernel.array import FixedStrideArrayDimTag
+    from pymbolic import parse
+
+    new_dim_tags = (FixedStrideArrayDimTag(1), FixedStrideArrayDimTag(parse('end-start')))
+    new_args = [arg.copy(dim_tags=new_dim_tags) if arg.name[:3]=='map' else arg for arg in kernel.args]
+    kernel = kernel.copy(args=new_args)
+    return kernel
+
+
 def generate_cuda_kernel(program, extruded=False):
     # Kernel transformations
     args_to_make_global = []
@@ -2449,11 +2459,13 @@ def generate_cuda_kernel(program, extruded=False):
 
     if kernel.name == configuration["cuda_jitmodule_name"]:
         # choose the preferred algorithm here
-        # kernel, args_to_make_global = scpt(kernel, extruded)
+        kernel, args_to_make_global = scpt(kernel, extruded)
         # kernel, args_to_make_global = gcd_tt(kernel)
         # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
         # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
-        kernel, args_to_make_global = quad_view(kernel, program.callables_table)
+        # kernel, args_to_make_global = quad_view(kernel, program.callables_table)
+
+        kernel = transpose_maps(kernel)
     else:
         # batch cells into groups
         # essentially, each thread computes unroll_size elements, each block computes unroll_size*block_size elements
