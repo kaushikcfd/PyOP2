@@ -76,7 +76,7 @@ class Map(Map):
     @cached_property
     def device_handle(self):
         m_gpu = cuda_driver.mem_alloc(int(self.values.nbytes))
-        cuda_driver.memcpy_htod(m_gpu, self.values)
+        cuda_driver.memcpy_htod(m_gpu, self.values.flatten())
         return m_gpu
 
     @cached_property
@@ -273,36 +273,26 @@ class JITModule(base.JITModule):
         return const_args_as_globals
 
     @memoize_method
-    def renumber_args(self, args):
-        # FIXME: WARNING Doing all these micro-optimizations for P2-Poisson
-        # only.
-        # Will generalize it later.
+    def print_data_layout_info(self, args):
+        print(75*"=")
+        print("WARNING: These numbers should be only trusted for a P2 element")
+        print(75*"=")
+
         import pycuda.driver as cuda
         dev_map_basis, dev_map_coords = args[-2:]
-        map_basis = np.empty(dtype=self.processed_program.args[-2].dtype, shape=(args[1]-args[0], 6))
-        map_coords = np.empty(dtype=self.processed_program.args[-1].dtype, shape=(args[1]-args[0], 3))
+        map_basis = np.empty(dtype=self.processed_program.args[-2].dtype, shape=(6, args[1]-args[0]))
+        map_coords = np.empty(dtype=self.processed_program.args[-1].dtype, shape=(3, args[1]-args[0]))
         cuda.memcpy_dtoh(dest=map_basis, src=dev_map_basis)
         cuda.memcpy_dtoh(dest=map_coords, src=dev_map_coords)
 
-        basis_shape = (np.max(map_basis)+1, )
-        coords_shape = (np.max(map_coords)+1, 2)
+        print(map_coords)
+        print(map_basis)
+        print(75*"=")
 
-        dev_out_basis, dev_coords, dev_in_basis = args[2:5]
+        print('Basis max:', np.max(map_basis))
+        print('Coords max:', np.max(map_coords))
 
-        out_basis = np.empty(shape=basis_shape, dtype=np.float64)
-        in_basis = np.empty(shape=basis_shape, dtype=np.float64)
-        coords = np.empty(shape=coords_shape, dtype=np.float64)
-
-        cuda.memcpy_dtoh(dest=out_basis, src=dev_out_basis)
-        cuda.memcpy_dtoh(dest=in_basis, src=dev_in_basis)
-        cuda.memcpy_dtoh(dest=coords, src=dev_coords)
-
-        np.set_printoptions(threshold=np.inf, linewidth=1000)
-
-        alrady_seen = dict()  # old to new
-
-        print(map_basis.shape)
-        1/0
+        # map_basis = map_basis.T
         map_basis = map_basis.flatten()
         map_basis = map_basis.reshape((args[1]*6) // 32, 32)
         map_basis = map_basis // 4
@@ -310,27 +300,27 @@ class JITModule(base.JITModule):
         for warp in map_basis:
             accesses.append(len(np.unique(warp)))
 
+
         accesses = np.array(accesses)
-        print(len(accesses))
-        print((args[1]*6) // 32)
-        print(np.average(accesses))
-        1/0
+        print('Transactions per access for DOFs:', np.average(accesses))
 
-        # CONVERTING BACK TO DEVICE MEMORIES.
-        cuda.memcpy_htod(src=out_basis, dest=dev_out_basis)
-        cuda.memcpy_htod(src=coords, dest=dev_coords)
-        cuda.memcpy_htod(src=in_basis, dest=dev_in_basis)
-        cuda.memcpy_htod(src=map_basis, dest=dev_map_basis)
-        cuda.memcpy_htod(src=map_coords, dest=dev_map_coords)
+        # map_coords = map_coords.T
+        map_coords = map_coords.flatten()
+        map_coords = map_coords.reshape((args[1]*3) // 32, 32)
+        map_coords = map_coords // 4
+        accesses = []
+        for warp in map_coords:
+            accesses.append(len(np.unique(warp)))
 
-        return args[0], args[1], dev_out_basis, dev_coords, dev_in_basis, dev_map_basis, dev_map_coords
+        accesses = np.array(accesses)
+        print('Transactions per access for Coords:', np.average(accesses))
 
     @collective
     def __call__(self, *args):
         grid, block = self.grid_size(args[0], args[1])
         extra_global_args = self.get_args_marked_for_globals
 
-        # args = self.renumber_args(args)
+        # self.print_data_layout_info(args)
 
         return self._fun.prepared_call(grid, block, *(args+extra_global_args))
 
@@ -2486,7 +2476,6 @@ def generate_cuda_kernel(program, extruded=False):
         code = code.replace("inline void pyop2_kernel_uniform_extrusion", "__device__ inline void pyop2_kernel_uniform_extrusion")
 
     if program.name == configuration["cuda_jitmodule_name"]:
-        # print(code)
         pass
         # with open('current_kernel.cu', 'w') as f:
         #     # code = f.read()
