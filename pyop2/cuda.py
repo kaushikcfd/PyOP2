@@ -516,7 +516,7 @@ def generate_single_cell_wrapper(iterset, args, forward_args=(), kernel_name=Non
 
 def scpt(kernel, extruded=False):
     args_to_make_global = []
-    pack_consts_to_globals = configuration["cuda_const_as_global"]
+    pack_consts_to_globals = True #  configuration["cuda_const_as_global"]
     batch_size = configuration["cuda_block_size"]
 
     if extruded:
@@ -657,7 +657,7 @@ def scpt(kernel, extruded=False):
             args_to_make_global)
 
 
-def gcd_tt(kernel):
+def gcd_tt(kernel, callables_table):
 
     # {{{ reading info about the finite element
 
@@ -797,6 +797,45 @@ def gcd_tt(kernel):
     # {{{ realizing CUDA blocks(i.e. chunk)
 
     kernel = loopy.split_iname(kernel, "n", ncells_per_chunk, outer_iname="ichunk", inner_iname="icell")
+
+    # }}}
+
+
+    # {{{ organize for precomputes
+
+    from loopy.transform.batch import save_temporaries_in_loop
+
+    kernel = save_temporaries_in_loop(kernel, 'icell', ['t1', 't2'], within='reads:t1 or writes:t1 or reads:t2 or writes:t2')
+
+    written_count = dict((written_var, 0) for written_var in
+            kernel.get_written_variables())
+    for insn in kernel.instructions:
+        if isinstance(insn.assignee, Variable):
+            written_count[insn.assignee.name] += 1
+        elif isinstance(insn.assignee, Subscript):
+            written_count[insn.assignee.aggregate.name] += 1
+
+    from loopy.transform.data import remove_unused_axes_in_temporaries
+    kernel = remove_unused_axes_in_temporaries(kernel)
+
+    args_to_be_interpreted_as_substs = set()
+
+    for insn in kernel.instructions:
+        if frozenset(['gather']) & insn.tags:
+            if isinstance(insn.assignee, Subscript) and (
+                    written_count[insn.assignee.aggregate.name] == 1):
+                args_to_be_interpreted_as_substs.add(
+                        insn.assignee.aggregate.name)
+
+    substs_to_insns = dict((var_name, []) for var_name in args_to_be_interpreted_as_substs)
+
+    for insn in kernel.instructions:
+        precompted_args_referred_in_insn = (insn.read_dependency_names() & args_to_be_interpreted_as_substs)
+        for arg_name in precompted_args_referred_in_insn:
+            substs_to_insns[arg_name].append(insn.id)
+
+    for arg_name in args_to_be_interpreted_as_substs:
+        kernel = loopy.assignment_to_subst(kernel, arg_name)
 
     # }}}
 
@@ -1000,6 +1039,42 @@ def gcd_tt(kernel):
                                 constraint.get_coefficients_by_name())))
 
     kernel = kernel.copy(domains=[new_domain])
+
+    # }}}
+
+    # {{{ load the gather variables in coordination
+
+    # TODO: Is there a more general way to do this?
+    subst_names_to_sweep_inames = {
+        "t1": ["icell_quad"],
+        "t2": ["icell_quad", "form_i"],
+        }
+
+    from loopy.transform.precompute import precompute_for_single_kernel
+    for subst in args_to_be_interpreted_as_substs:
+        rule = kernel.substitutions['%s_subst' % subst]
+        vng = kernel.get_var_name_generator()
+        sweep_inames = subst_names_to_sweep_inames[subst]
+
+        precompute_inames = tuple(vng(based_on='icopy') for _ in rule.arguments)
+
+        kernel = precompute_for_single_kernel(kernel, callables_table,
+                subst_use='%s_subst' % subst,
+                sweep_inames=sweep_inames,
+                precompute_outer_inames=frozenset(["ichunk_quad"]),
+                temporary_address_space=loopy.AddressSpace.LOCAL,
+                precompute_inames=precompute_inames,
+                temporary_name='%s_temp' % subst,
+                compute_insn_id='copy_%s' % subst,
+                default_tag=None)
+
+        if len(precompute_inames) > 1:
+            iname_to_split = vng(based_on="icopy_total")
+            kernel = loopy.join_inames(kernel, precompute_inames, iname_to_split)
+        else:
+            iname_to_split = precompute_inames[0]
+
+        kernel = loopy.split_iname(kernel, iname_to_split, nthreads_per_cell * ncells_per_chunk, outer_tag="ilp", inner_tag="l.0")
 
     # }}}
 
@@ -2416,6 +2491,7 @@ def quad_view(kernel, callables_table):
 
 
 def transpose_maps(kernel):
+    print("Caution: The map representaion in the kernel is transposed")
     from loopy.kernel.array import FixedStrideArrayDimTag
     from pymbolic import parse
 
@@ -2459,8 +2535,8 @@ def generate_cuda_kernel(program, extruded=False):
 
     if kernel.name == configuration["cuda_jitmodule_name"]:
         # choose the preferred algorithm here
-        kernel, args_to_make_global = scpt(kernel, extruded)
-        # kernel, args_to_make_global = gcd_tt(kernel)
+        # kernel, args_to_make_global = scpt(kernel, extruded)
+        kernel, args_to_make_global = gcd_tt(kernel, program.callables_table)
         # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
         # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
         # kernel, args_to_make_global = quad_view(kernel, program.callables_table)
