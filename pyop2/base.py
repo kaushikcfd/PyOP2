@@ -2747,7 +2747,7 @@ class Map(object):
         self._arity = arity
         self._values = verify_reshape(values, IntType,
                                       (arity, iterset.total_size),
-                                      allow_none=True)
+                                      allow_none=True).flatten()
         self.shape = (iterset.total_size, arity)
         self._name = name or "map_%d" % Map._globalcount
         if offset is None or len(offset) == 0:

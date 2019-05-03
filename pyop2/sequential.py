@@ -161,16 +161,6 @@ class JITModule(base.JITModule):
 
     @collective
     def __call__(self, *args):
-        import ctypes as C
-        from ctypes.util import find_library
-        libc = C.CDLL(find_library('gcc'))
-        libc.malloc.restype = C.c_void_p
-
-        # get a pointer to a block of data from malloc
-        data_pointer = C.cast(args[-1],C.POINTER(C.c_int))
-        danda_map = numpy.ctypeslib.as_array(data_pointer, shape=(3, 512*512*2))
-
-        print(danda_map)
         return self._fun(*args)
 
     @cached_property
