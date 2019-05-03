@@ -78,7 +78,7 @@ class Configuration(dict):
     # name, env variable, type, default, write once
     DEFAULTS = {
         "compiler": ("PYOP2_BACKEND_COMPILER", str, "gcc"),
-        "simd_width": ("PYOP2_SIMD_WIDTH", int, 1),
+        "simd_width": ("PYOP2_SIMD_WIDTH", int, 4),
         "debug": ("PYOP2_DEBUG", bool, False),
         "cflags": ("PYOP2_CFLAGS", str, ""),
         "ldflags": ("PYOP2_LDFLAGS", str, ""),
@@ -93,7 +93,7 @@ class Configuration(dict):
         "node_local_compilation": ("PYOP2_NODE_LOCAL_COMPILATION", bool, True),
         "no_fork_available": ("PYOP2_NO_FORK_AVAILABLE", bool, False),
         "print_cache_size": ("PYOP2_PRINT_CACHE_SIZE", bool, False),
-        "print_summary": ("PYOP2_PRINT_SUMMARY", bool, False),
+        "print_summary": ("PYOP2_PRINT_SUMMARY", bool, True),
         "matnest": ("PYOP2_MATNEST", bool, True),
         "block_sparsity": ("PYOP2_BLOCK_SPARSITY", bool, True),
     }

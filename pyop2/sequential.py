@@ -62,6 +62,18 @@ from pyop2.utils import cached_property, get_petsc_dir
 from pyop2.configuration import configuration
 
 
+
+def transpose_maps(kernel):
+    print("Caution: The map representaion in the kernel is transposed")
+    from loopy.kernel.array import FixedStrideArrayDimTag
+    from pymbolic import parse
+
+    new_dim_tags = (FixedStrideArrayDimTag(1), FixedStrideArrayDimTag(parse('end-start')))
+    new_args = [arg.copy(dim_tags=new_dim_tags) if arg.name[:3]=='map' else arg for arg in kernel.args]
+    kernel = kernel.copy(args=new_args)
+    return kernel
+
+
 def vectorize(wrapper, iname, batch_size, start, end):
 
     if batch_size == 1:
@@ -91,6 +103,8 @@ def vectorize(wrapper, iname, batch_size, start, end):
     for name in kernel.temporary_variables:
         tv = kernel.temporary_variables[name]
         kernel.temporary_variables[name] = tv.copy(alignment=alignment)
+
+    kernel = transpose_maps(kernel)
 
     wrapper = wrapper.with_root_kernel(kernel)
 
@@ -147,6 +161,16 @@ class JITModule(base.JITModule):
 
     @collective
     def __call__(self, *args):
+        import ctypes as C
+        from ctypes.util import find_library
+        libc = C.CDLL(find_library('gcc'))
+        libc.malloc.restype = C.c_void_p
+
+        # get a pointer to a block of data from malloc
+        data_pointer = C.cast(args[-1],C.POINTER(C.c_int))
+        danda_map = numpy.ctypeslib.as_array(data_pointer, shape=(3, 512*512*2))
+
+        print(danda_map)
         return self._fun(*args)
 
     @cached_property
