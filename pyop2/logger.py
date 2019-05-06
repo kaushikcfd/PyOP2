@@ -90,3 +90,12 @@ def progress(level, msg, *args, **kwargs):
     yield
     _indent -= 2
     log(level, (' ' * _indent) + msg + '...done', *args, **kwargs)
+
+
+class _ExecTimeNoter(object):
+    times = []
+
+    def note(self, time):
+        self.times.append(time)
+
+ExecTimeNoter = _ExecTimeNoter()

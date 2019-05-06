@@ -61,6 +61,7 @@ from pyop2.mpi import collective
 from pyop2.profiling import timed_region, timed_function
 from pyop2.utils import cached_property, get_petsc_dir
 from pyop2.configuration import configuration
+from pyop2.logger import ExecTimeNoter
 
 import loopy
 import pycuda
@@ -429,7 +430,7 @@ class ParLoop(petsc_base.ParLoop):
         self.nbytes = nbytes
         wrapper_name = "wrap_" + self._kernel.name
         if wrapper_name not in ParLoop.printed:
-            print("{0}_BYTES= {1}".format("wrap_" + self._kernel.name, self.nbytes))
+            # print("{0}_BYTES= {1}".format("wrap_" + self._kernel.name, self.nbytes))
             ParLoop.printed.add(wrapper_name)
 
         return arglist
@@ -464,19 +465,18 @@ class ParLoop(petsc_base.ParLoop):
             return
 
         if configuration["cuda_timer"]:
-            # fun(part.offset, part.offset + part.size, *arglist)  # warm up
+            from time import time
             start = cuda_driver.Event()
             end = cuda_driver.Event()
-            if configuration["cuda_timer_profile"]:
-                cuda_driver.start_profiler()
+            py_start_time = time()
             start.record()
-            for _ in range(configuration["cuda_timer_repeat"]):
-                fun(part.offset, part.offset + part.size, *arglist)
+            # start.synchronize()
+            fun(part.offset, part.offset + part.size, *arglist)
             end.record()
             end.synchronize()
-            print("{0}_TIME= {1}".format(self._jitmodule._wrapper_name, start.time_till(end)/1000))
-            if configuration["cuda_timer_profile"]:
-                cuda_driver.stop_profiler()
+            py_end_time = time()
+            print("Python time:", py_end_time-py_start_time)
+            ExecTimeNoter.note(start.time_till(end)/1000)
             return
 
         with timed_region("ParLoop_{0}_{1}".format(self.iterset.name, self._jitmodule._wrapper_name)):
@@ -517,6 +517,7 @@ def generate_single_cell_wrapper(iterset, args, forward_args=(), kernel_name=Non
 def scpt(kernel, extruded=False):
     args_to_make_global = []
     pack_consts_to_globals = True #  configuration["cuda_const_as_global"]
+    copy_consts_to_shared = True
     batch_size = configuration["cuda_block_size"]
 
     if extruded:
@@ -578,7 +579,8 @@ def scpt(kernel, extruded=False):
 
     n_lids = 0
 
-    if True:
+    if copy_consts_to_shared:
+        # copying the constant matrices to shared mem.
         from pymbolic.primitives import Variable, Subscript
 
         new_temps = {}
@@ -587,6 +589,7 @@ def scpt(kernel, extruded=False):
         new_insns = []
         new_domains = []
         priorities = []
+        new_global_vars = []
 
         for tv in kernel.temporary_variables.values():
             if tv.address_space == loopy.AddressSpace.GLOBAL:
@@ -600,6 +603,7 @@ def scpt(kernel, extruded=False):
                 priorities.append(inames)
                 var_inames = tuple(Variable(iname) for iname in inames)
                 new_temps[new_name] = old_tv.copy(name=new_name)
+                new_global_vars.append(new_name)
                 new_insns.append(loopy.Assignment(
                     id=insn_id_generator(based_on="insn_copy"),
                     assignee=Subscript(Variable(old_name),
@@ -625,6 +629,9 @@ def scpt(kernel, extruded=False):
         kernel = loopy.add_dependency(kernel, "tag:gather", "tag:init_shared")
         for priority in priorities:
             kernel = loopy.prioritize_loops(kernel, ",".join(priority))
+
+        new_silenced_warnings = kernel.silenced_warnings + ["read_no_write(%s)" % var_name for var_name in new_global_vars]
+        kernel = kernel.copy(silenced_warnings=new_silenced_warnings)
 
         for insn in kernel.instructions:
             if "init_shared" in insn.tags:
@@ -2535,8 +2542,8 @@ def generate_cuda_kernel(program, extruded=False):
 
     if kernel.name == configuration["cuda_jitmodule_name"]:
         # choose the preferred algorithm here
-        # kernel, args_to_make_global = scpt(kernel, extruded)
-        kernel, args_to_make_global = gcd_tt(kernel, program.callables_table)
+        kernel, args_to_make_global = scpt(kernel, extruded)
+        # kernel, args_to_make_global = gcd_tt(kernel, program.callables_table)
         # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
         # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
         # kernel, args_to_make_global = quad_view(kernel, program.callables_table)
