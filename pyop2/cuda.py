@@ -323,7 +323,7 @@ class JITModule(base.JITModule):
 
         # self.print_data_layout_info(args)
 
-        return self._fun.prepared_call(grid, block, *(args+extra_global_args))
+        return self._fun.prepared_call(grid, block, *(args[1:]+extra_global_args))
 
     @cached_property
     def _wrapper_name(self):
@@ -368,7 +368,7 @@ class JITModule(base.JITModule):
             options.append("-lineinfo")
         func = SourceModule(self.code_to_compile, options=options)
         self._fun = func.get_function(self._wrapper_name)
-        self._fun.prepare(self.argtypes+"P"*len(self.args_to_make_global))
+        self._fun.prepare(self.argtypes[1:]+"P"*len(self.args_to_make_global))
 
         # Blow away everything we don't need any more
         del self._args
@@ -672,17 +672,13 @@ def gcd_tt(kernel, callables_table):
     nbasis = int(loopy.symbolic.pw_aff_to_expr(
             kernel.get_iname_bounds('form_j', constants_only=True).size))
 
-    nthreads_per_cell = int(np.gcd(nquad, nbasis))
-
     # }}}
 
     # {{{ performance params
 
+    nthreads_per_cell = int(np.gcd(nquad, nbasis))
     copy_consts_to_shared = True
     pack_consts_to_globals = True
-    tiled_access_to_the_vars = True
-    # we can tile only if variables are copied to shared memory
-    assert not tiled_access_to_the_vars or copy_consts_to_shared
     ncells_per_chunk = 32
 
     # }}}
@@ -715,13 +711,31 @@ def gcd_tt(kernel, callables_table):
 
     # }}}
 
+    # {{{ making consts as globals
+
+    if pack_consts_to_globals:
+        args_to_make_global = [tv.initializer.flatten()
+                for tv in kernel.temporary_variables.values()
+                if (tv.initializer is not None
+                    and tv.address_space == loopy.AddressSpace.GLOBAL)]
+
+        new_temps = dict((tv.name, tv.copy(initializer=None))
+                if (tv.initializer is not None
+                    and tv.address_space == loopy.AddressSpace.GLOBAL)
+                else (tv.name, tv) for tv in
+                kernel.temporary_variables.values())
+
+        kernel = kernel.copy(temporary_variables=new_temps)
+
+    # }}}
+
     # {{{ feeding the constants into shared memory
 
     consts_precomputed = set()
 
+    from pymbolic.primitives import Variable, Subscript
     if copy_consts_to_shared:
         # Add temporaries, instructions and domains for copying the constant variables
-        from pymbolic.primitives import Variable, Subscript
 
         new_temps = {}
         var_name_generator = kernel.get_var_name_generator()
@@ -770,7 +784,6 @@ def gcd_tt(kernel, callables_table):
                 domains=kernel.domains+new_domains)
         kernel = loopy.add_dependency(kernel, "tag:gather", "tag:init_shared")
         new_silenced_warnings = kernel.silenced_warnings + ["read_no_write(%s)" % var_name for var_name in new_global_vars]
-        print(new_silenced_warnings)
         kernel = kernel.copy(silenced_warnings=new_silenced_warnings)
 
         for inames in copy_inames:
@@ -781,27 +794,8 @@ def gcd_tt(kernel, callables_table):
                 iname_to_split = inames[0]
 
             kernel = loopy.split_iname(kernel, iname_to_split,
-                    nthreads_per_cell * ncells_per_chunk, inner_tag="l.0",
-                    outer_tag="ilp")
+                    nthreads_per_cell * ncells_per_chunk, inner_tag="l.0",)
             n_lids += 1
-
-    # }}}
-
-    # {{{ making consts as globals
-
-    if pack_consts_to_globals:
-        args_to_make_global = [tv.initializer.flatten()
-                for tv in kernel.temporary_variables.values()
-                if (tv.initializer is not None
-                    and tv.address_space == loopy.AddressSpace.GLOBAL)]
-
-        new_temps = dict((tv.name, tv.copy(initializer=None))
-                if (tv.initializer is not None
-                    and tv.address_space == loopy.AddressSpace.GLOBAL)
-                else (tv.name, tv) for tv in
-                kernel.temporary_variables.values())
-
-        kernel = kernel.copy(temporary_variables=new_temps)
 
     # }}}
 
@@ -811,41 +805,17 @@ def gcd_tt(kernel, callables_table):
 
     # }}}
 
-
-    # {{{ organize for precomputes
+    # {{{ interpret coordinate and input basis coeffs as substitutions
 
     from loopy.transform.batch import save_temporaries_in_loop
-
-    kernel = save_temporaries_in_loop(kernel, 'icell', ['t1', 't2'], within='reads:t1 or writes:t1 or reads:t2 or writes:t2')
-
-    written_count = dict((written_var, 0) for written_var in
-            kernel.get_written_variables())
-    for insn in kernel.instructions:
-        if isinstance(insn.assignee, Variable):
-            written_count[insn.assignee.name] += 1
-        elif isinstance(insn.assignee, Subscript):
-            written_count[insn.assignee.aggregate.name] += 1
-
     from loopy.transform.data import remove_unused_axes_in_temporaries
+
+    #FIXME: Directly accesses a variable.
+    args_to_substs = ['t1', 't2']
     kernel = remove_unused_axes_in_temporaries(kernel)
+    kernel = save_temporaries_in_loop(kernel, 'icell', args_to_substs, within='not tag:init_shared')
 
-    args_to_be_interpreted_as_substs = set()
-
-    for insn in kernel.instructions:
-        if frozenset(['gather']) & insn.tags:
-            if isinstance(insn.assignee, Subscript) and (
-                    written_count[insn.assignee.aggregate.name] == 1):
-                args_to_be_interpreted_as_substs.add(
-                        insn.assignee.aggregate.name)
-
-    substs_to_insns = dict((var_name, []) for var_name in args_to_be_interpreted_as_substs)
-
-    for insn in kernel.instructions:
-        precompted_args_referred_in_insn = (insn.read_dependency_names() & args_to_be_interpreted_as_substs)
-        for arg_name in precompted_args_referred_in_insn:
-            substs_to_insns[arg_name].append(insn.id)
-
-    for arg_name in args_to_be_interpreted_as_substs:
+    for arg_name in args_to_substs:
         kernel = loopy.assignment_to_subst(kernel, arg_name)
 
     # }}}
@@ -854,7 +824,7 @@ def gcd_tt(kernel, callables_table):
 
     temp_vars = frozenset(kernel.temporary_variables.keys())
 
-    written_in_load = frozenset().union(*[insn.write_dependency_names() for
+    written_in_gather = frozenset().union(*[insn.write_dependency_names() for
         insn in kernel.instructions if 'gather' in insn.tags]) & temp_vars
 
     written_in_quad = frozenset().union(*[insn.write_dependency_names() for
@@ -873,14 +843,14 @@ def gcd_tt(kernel, callables_table):
     # Main aim: The variable in which the result of the basis coefficient is
     # written should be initialized in the basis part itself
 
-    vars_not_neeeded_in_quad = written_in_load - read_in_quad
+    output_basis_coeffs = written_in_gather - read_in_quad
 
     # so lets just write in the basis part
-    written_in_load = written_in_load - vars_not_neeeded_in_quad
+    written_in_gather = written_in_gather - output_basis_coeffs
 
     insns_to_be_added_in_basis = frozenset([insn.id for insn in
         kernel.instructions if insn.write_dependency_names()
-        & vars_not_neeeded_in_quad and 'gather' in insn.tags])
+        & output_basis_coeffs and 'gather' in insn.tags])
 
     def _remove_unnecessary_deps_on_load(insn):
         return insn.copy(depends_on=insn.depends_on - insns_to_be_added_in_basis)
@@ -893,6 +863,7 @@ def gcd_tt(kernel, callables_table):
             return insn.copy(tags=insn.tags-frozenset(["gather"])
                 | frozenset(["basis", "basis_init"]))
         return insn
+
     kernel = loopy.map_instructions(kernel, "id:*",
             _add_unnecessary_instructions_to_basis)
 
@@ -900,9 +871,9 @@ def gcd_tt(kernel, callables_table):
 
     # {{{ storing values between the stages
 
-    batch_vars = (written_in_quad & read_in_basis)  # function evaluation at quadrature
-    kernel = loopy.save_temporaries_in_loop(kernel, 'form_ip', batch_vars, within='iname:form_ip')
-    kernel = loopy.save_temporaries_in_loop(kernel, 'icell', batch_vars, within="not tag:init_shared")
+    eval_vars = (written_in_quad & read_in_basis)  # function evaluation at quadrature
+    kernel = loopy.save_temporaries_in_loop(kernel, 'form_ip', eval_vars, within='iname:form_ip')
+    kernel = loopy.save_temporaries_in_loop(kernel, 'icell', eval_vars, within="not tag:init_shared")
 
     # }}}
 
@@ -1012,7 +983,7 @@ def gcd_tt(kernel, callables_table):
                     -(ncells_per_chunk),
                     'icell_%s' % stage:
                     -1,
-                    'start': -1, 'end': 1, 1: -1}))
+                    'end': 1, 1: -1}))
         new_dom = new_dom.add_constraint(
                 islpy.Constraint.ineq_from_names(new_space, {
                     'ichunk_%s' % stage: 1}))
@@ -1055,17 +1026,17 @@ def gcd_tt(kernel, callables_table):
 
     # {{{ load the gather variables in coordination
 
-    # TODO: Is there a more general way to do this?
-    subst_names_to_sweep_inames = {
+    # FIXME: Generalize this logic.
+    # Over here I have assumed that 't1' points to the coordinates, 't2' points to the input basis coeffs.
+    substs_to_sweep_inames = {
         "t1": ["icell_quad"],
         "t2": ["icell_quad"] + int('form_i' in kernel.all_inames())*["form_i"],
         }
 
     from loopy.transform.precompute import precompute_for_single_kernel
-    for subst in args_to_be_interpreted_as_substs:
+    for subst, sweep_inames in substs_to_sweep_inames.items():
         rule = kernel.substitutions['%s_subst' % subst]
         vng = kernel.get_var_name_generator()
-        sweep_inames = subst_names_to_sweep_inames[subst]
 
         precompute_inames = tuple(vng(based_on='icopy') for _ in rule.arguments)
 
@@ -1085,7 +1056,7 @@ def gcd_tt(kernel, callables_table):
         else:
             iname_to_split = precompute_inames[0]
 
-        kernel = loopy.split_iname(kernel, iname_to_split, nthreads_per_cell * ncells_per_chunk, outer_tag="ilp", inner_tag="l.0")
+        kernel = loopy.split_iname(kernel, iname_to_split, nthreads_per_cell * ncells_per_chunk, inner_tag="l.0", outer_tag="ilp")
 
     # }}}
 
@@ -1113,10 +1084,13 @@ def gcd_tt(kernel, callables_table):
 
     from loopy.transform.make_scalar import (
             make_scalar, remove_invariant_inames)
-    # FIXME: generalize this
-    kernel = make_scalar(kernel, 't0')
+    for arg in output_basis_coeffs:
+        kernel = make_scalar(kernel, arg)
+        
     kernel = loopy.save_temporaries_in_loop(kernel, basis_iname+"_outer",
-            ['t0'], within="tag:basis or tag:scatter")
+            output_basis_coeffs, within="tag:basis or tag:scatter")
+    
+    #FIXME: This is also ugly!
     kernel = remove_invariant_inames(kernel)
 
     # }}}
@@ -1127,7 +1101,6 @@ def gcd_tt(kernel, callables_table):
         }
     for i in range(n_lids):
         iname_tags["local_id%d" % i] = "l.0"
-        iname_tags["aux_local_id%d_outer" % i] = "ilp"
 
     kernel = loopy.tag_inames(kernel, iname_tags, ignore_nonexistent=True)
     kernel = loopy.remove_unused_inames(kernel).copy(loop_priority=frozenset())
@@ -2506,7 +2479,7 @@ def transpose_maps(kernel):
     from loopy.kernel.array import FixedStrideArrayDimTag
     from pymbolic import parse
 
-    new_dim_tags = (FixedStrideArrayDimTag(1), FixedStrideArrayDimTag(parse('end-start')))
+    new_dim_tags = (FixedStrideArrayDimTag(1), FixedStrideArrayDimTag(parse('end')))
     new_args = [arg.copy(dim_tags=new_dim_tags) if arg.name[:3]=='map' else arg for arg in kernel.args]
     kernel = kernel.copy(args=new_args)
     return kernel
@@ -2545,6 +2518,8 @@ def generate_cuda_kernel(program, extruded=False):
     kernel = kernel.copy(instructions=new_insns, args=new_args)
 
     if kernel.name == configuration["cuda_jitmodule_name"]:
+        kernel = loopy.fix_parameters(kernel, start=0)
+        kernel = loopy.assume(kernel, "end > 0")
         # choose the preferred algorithm here
         # kernel, args_to_make_global = scpt(kernel, extruded)
         kernel, args_to_make_global = gcd_tt(kernel, program.callables_table)
@@ -2575,6 +2550,9 @@ def generate_cuda_kernel(program, extruded=False):
         code = code.replace("inline void pyop2_kernel_uniform_extrusion", "__device__ inline void pyop2_kernel_uniform_extrusion")
 
     if program.name == configuration["cuda_jitmodule_name"]:
+        print("Generated code")
+        # print(code)
+        # 1/0
         pass
         # with open('current_kernel.cu', 'w') as f:
         #     # code = f.read()
