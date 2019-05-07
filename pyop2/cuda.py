@@ -475,7 +475,7 @@ class ParLoop(petsc_base.ParLoop):
             end.record()
             end.synchronize()
             py_end_time = time()
-            print("Python time:", py_end_time-py_start_time)
+            # print("Python time:", py_end_time-py_start_time)
             ExecTimeNoter.note(start.time_till(end)/1000)
             return
 
@@ -665,7 +665,6 @@ def scpt(kernel, extruded=False):
 
 
 def gcd_tt(kernel, callables_table):
-
     # {{{ reading info about the finite element
 
     nquad = int(loopy.symbolic.pw_aff_to_expr(
@@ -730,6 +729,7 @@ def gcd_tt(kernel, callables_table):
         new_insns = []
         new_domains = []
         copy_inames = []
+        new_global_vars = []
 
         for tv in kernel.temporary_variables.values():
             if tv.address_space == loopy.AddressSpace.GLOBAL:
@@ -745,6 +745,7 @@ def gcd_tt(kernel, callables_table):
                 copy_inames.append(inames)
                 var_inames = tuple(Variable(iname) for iname in inames)
                 new_temps[new_name] = old_tv.copy(name=new_name)
+                new_global_vars.append(new_name)
                 new_insns.append(loopy.Assignment(
                     id=insn_id_generator(based_on="insn_copy"),
                     assignee=Subscript(Variable(old_name),
@@ -768,6 +769,9 @@ def gcd_tt(kernel, callables_table):
                 instructions=kernel.instructions+new_insns,
                 domains=kernel.domains+new_domains)
         kernel = loopy.add_dependency(kernel, "tag:gather", "tag:init_shared")
+        new_silenced_warnings = kernel.silenced_warnings + ["read_no_write(%s)" % var_name for var_name in new_global_vars]
+        print(new_silenced_warnings)
+        kernel = kernel.copy(silenced_warnings=new_silenced_warnings)
 
         for inames in copy_inames:
             if len(inames) > 1:
@@ -1054,7 +1058,7 @@ def gcd_tt(kernel, callables_table):
     # TODO: Is there a more general way to do this?
     subst_names_to_sweep_inames = {
         "t1": ["icell_quad"],
-        "t2": ["icell_quad", "form_i"],
+        "t2": ["icell_quad"] + int('form_i' in kernel.all_inames())*["form_i"],
         }
 
     from loopy.transform.precompute import precompute_for_single_kernel
@@ -2542,8 +2546,8 @@ def generate_cuda_kernel(program, extruded=False):
 
     if kernel.name == configuration["cuda_jitmodule_name"]:
         # choose the preferred algorithm here
-        kernel, args_to_make_global = scpt(kernel, extruded)
-        # kernel, args_to_make_global = gcd_tt(kernel, program.callables_table)
+        # kernel, args_to_make_global = scpt(kernel, extruded)
+        kernel, args_to_make_global = gcd_tt(kernel, program.callables_table)
         # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
         # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
         # kernel, args_to_make_global = quad_view(kernel, program.callables_table)
