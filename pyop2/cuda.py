@@ -731,8 +731,6 @@ def gcd_tt(kernel, callables_table):
 
     # {{{ feeding the constants into shared memory
 
-    consts_precomputed = set()
-
     from pymbolic.primitives import Variable, Subscript
     if copy_consts_to_shared:
         # Add temporaries, instructions and domains for copying the constant variables
@@ -751,7 +749,6 @@ def gcd_tt(kernel, callables_table):
                 old_tv = tv.copy()
 
                 old_name = old_tv.name
-                consts_precomputed.add(old_name)
                 new_name = var_name_generator(based_on="const_"+tv.name)
 
                 inames = tuple(var_name_generator(based_on="icopy") for _
@@ -783,8 +780,8 @@ def gcd_tt(kernel, callables_table):
                 instructions=kernel.instructions+new_insns,
                 domains=kernel.domains+new_domains)
         kernel = loopy.add_dependency(kernel, "tag:gather", "tag:init_shared")
-        new_silenced_warnings = kernel.silenced_warnings + ["read_no_write(%s)" % var_name for var_name in new_global_vars]
-        kernel = kernel.copy(silenced_warnings=new_silenced_warnings)
+        silenced_warnings = kernel.silenced_warnings + ["read_no_write(%s)" % var_name for var_name in new_global_vars]
+        kernel = kernel.copy(silenced_warnings=silenced_warnings)
 
         for inames in copy_inames:
             if len(inames) > 1:
@@ -896,71 +893,6 @@ def gcd_tt(kernel, callables_table):
 
     # All these inames are split in some way and should not be used in instructions
     assert not (frozenset(["icell", "n", "ichunk"]) & kernel.all_inames())
-
-    # }}}
-
-    # {{{ realizing which instructions belongs to which part
-
-    # Yes, this shouldn't be here. Should be realized from TSFC. But works for
-    # now. Is this the worst humanity has ever seen, no(obviously). Is this the
-    # worst use of logic in a Scientific Computing library? Probably yes!
-
-    new_insns = []
-
-    done_with_jacobi_eval = False
-    done_with_quad_init = False
-    done_with_quad_reduction = False
-    done_with_quad_wrap_up = False
-    done_with_basis_init = False
-    done_with_basis_reduction = False
-
-    for insn in kernel.instructions:
-        if not done_with_jacobi_eval:
-            if 'form_ip_quad' in insn.within_inames:
-                done_with_jacobi_eval = True
-
-            else:
-                new_insns.append(insn.copy(tags=insn.tags
-                    | frozenset(["jacobi_eval"])))
-                continue
-        if not done_with_quad_init:
-            if 'form_i' in insn.within_inames:
-                done_with_quad_init = True
-            else:
-                new_insns.append(insn.copy(tags=insn.tags
-                    | frozenset(["quad_init"])))
-                continue
-        if not done_with_quad_reduction:
-            if 'form_i' not in insn.within_inames:
-                done_with_quad_reduction = True
-            else:
-                new_insns.append(insn.copy(tags=insn.tags
-                    | frozenset(["quad_redn"])))
-                continue
-        if not done_with_quad_wrap_up:
-            if 'form_ip_quad' not in insn.within_inames:
-                done_with_quad_wrap_up = True
-            else:
-                new_insns.append(insn.copy(tags=insn.tags
-                    | frozenset(["quad_wrap_up"])))
-                continue
-        if not done_with_basis_init:
-            if 'form_ip_basis' in insn.within_inames:
-                done_with_basis_init = True
-            else:
-                new_insns.append(insn.copy(tags=insn.tags
-                    | frozenset(["basis_init"])))
-                continue
-        if not done_with_basis_reduction:
-            if 'form_ip_basis' not in insn.within_inames:
-                done_with_basis_reduction = True
-            else:
-                new_insns.append(insn.copy(tags=insn.tags
-                    | frozenset(["basis_redn"])))
-                continue
-        new_insns.append(insn)
-
-    kernel = kernel.copy(instructions=new_insns)
 
     # }}}
 
