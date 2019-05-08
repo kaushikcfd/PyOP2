@@ -98,4 +98,7 @@ class _ExecTimeNoter(object):
     def note(self, time):
         self.times.append(time)
 
+    def clear(self):
+        self.times = []
+
 ExecTimeNoter = _ExecTimeNoter()
