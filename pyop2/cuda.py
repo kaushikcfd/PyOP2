@@ -517,7 +517,7 @@ def generate_single_cell_wrapper(iterset, args, forward_args=(), kernel_name=Non
 def scpt(kernel, extruded=False):
     args_to_make_global = []
     pack_consts_to_globals = True #  configuration["cuda_const_as_global"]
-    copy_consts_to_shared = True
+    copy_consts_to_shared = False
     batch_size = configuration["cuda_block_size"]
 
     if extruded:
@@ -556,8 +556,6 @@ def scpt(kernel, extruded=False):
 
     else:
         kernel = loopy.split_iname(kernel, "n", batch_size, outer_tag="g.0", inner_tag="l.0")
-        kernel = loopy.assume(kernel, "{0} mod {1} = 0".format("end", batch_size))
-        kernel = loopy.assume(kernel, "exists zz: zz > 0 and {0} = {1}*zz + {2}".format("end", batch_size, "start"))
 
     # {{{ making consts as globals
 
@@ -677,9 +675,9 @@ def gcd_tt(kernel, callables_table):
     # {{{ performance params
 
     nthreads_per_cell = int(np.gcd(nquad, nbasis))
-    copy_consts_to_shared = True
+    copy_consts_to_shared = False
     pack_consts_to_globals = True
-    ncells_per_chunk = 32
+    ncells_per_chunk = 7
 
     # }}}
 
@@ -1060,7 +1058,7 @@ def tiled_gcd_tt(kernel, callables_table):
     tiled_access_to_the_vars = True
     # we can tile only if variables are copied to shared memory
     assert not tiled_access_to_the_vars or copy_consts_to_shared
-    ncells_per_chunk = 10
+    ncells_per_chunk = 32
     tile_quad = nthreads_per_cell
     tile_basis = nthreads_per_cell
 
@@ -1595,8 +1593,6 @@ def basis_view(kernel, callables_table):
     nbasis = int(loopy.symbolic.pw_aff_to_expr(
             kernel.get_iname_bounds('form_j', constants_only=True).size))
 
-    assert nbasis == 6
-
     # }}}
 
     # {{{ performance params
@@ -1856,19 +1852,6 @@ def basis_view(kernel, callables_table):
     # }}}
 
     # {{{ duplicating inames
-
-    """
-    # Turning off these for now.
-    # I do not see any prospect in it.
-
-    kernel = loopy.duplicate_inames(kernel, ["ichunk", "icell"],
-            new_inames=["ichunk_quad", "icell_quad"],
-            within="not (tag:basis or tag:scatter)", tags={"ichunk": "g.0"})
-
-    kernel = loopy.duplicate_inames(kernel, ["ichunk", "icell"],
-            new_inames=["ichunk_basis", "icell_basis"],
-            within="tag:basis or tag:scatter", tags={"ichunk": "g.0"})
-    """
 
     kernel = loopy.duplicate_inames(kernel, ["form_ip"],
             new_inames=["form_ip_quad"], within="tag:quadrature")
@@ -2452,14 +2435,15 @@ def generate_cuda_kernel(program, extruded=False):
     if kernel.name == configuration["cuda_jitmodule_name"]:
         kernel = loopy.fix_parameters(kernel, start=0)
         kernel = loopy.assume(kernel, "end > 0")
+
         # choose the preferred algorithm here
         # kernel, args_to_make_global = scpt(kernel, extruded)
-        kernel, args_to_make_global = gcd_tt(kernel, program.callables_table)
+        # kernel, args_to_make_global = gcd_tt(kernel, program.callables_table)
         # kernel,  args_to_make_global = tiled_gcd_tt(kernel, program.callables_table)
-        # kernel, args_to_make_global = basis_view(kernel, program.callables_table)
+        kernel, args_to_make_global = basis_view(kernel, program.callables_table)
         # kernel, args_to_make_global = quad_view(kernel, program.callables_table)
 
-        kernel = transpose_maps(kernel)
+        # kernel = transpose_maps(kernel)
     else:
         # batch cells into groups
         # essentially, each thread computes unroll_size elements, each block computes unroll_size*block_size elements
