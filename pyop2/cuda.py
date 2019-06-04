@@ -68,7 +68,7 @@ import pycuda
 import pycuda.autoinit
 import pycuda.driver as cuda_driver
 import numpy as np
-import islpy
+import math
 from collections import OrderedDict
 from pytools import memoize_method
 
@@ -514,14 +514,16 @@ def generate_single_cell_wrapper(iterset, args, forward_args=(), kernel_name=Non
     return code.device_code()
 
 
-def transform(kernel, callables_table, ncells_per_group=32,
+def transform(kernel, callables_table, ncells_per_block=32,
         nthreads_per_cell=1,
         matvec1_parallelize_across='row', matvec2_parallelize_across='row',
         matvec1_rowtiles=1, matvec1_coltiles=1,
         matvec2_rowtiles=1, matvec2_coltiles=1,
         n_tilecomputes_to_store_after=1,
         load_coordinates_to_shared=False,
-        load_input_to_shared=False,):
+        load_input_to_shared=False,
+        prefetch_tiles=True
+        ):
 
     # {{{ sanity checks
 
@@ -647,25 +649,25 @@ def transform(kernel, callables_table, ncells_per_group=32,
 
     # }}}
 
-    kernel = loopy.split_iname(kernel, "n", ncells_per_group*nthreads_per_cell,
-            outer_iname="igroup", inner_iname="icell")
+    # Realize CUDA blocks
+    kernel = loopy.split_iname(kernel, "n", ncells_per_block*nthreads_per_cell,
+            outer_iname="iblock", inner_iname="icell")
+
+    # Duplicate inames to separate transformation logic for quadrature and basis part
     kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:quadrature",
             "form_ip_quad")
     kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:basis",
             "form_ip_basis")
 
     if load_coordinates_to_shared:
+        #FIXME: Assumes uses the name 't1' for coordinates
         kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell', ['t1'])
         kernel = loopy.assignment_to_subst(kernel, 't1')
 
     if load_input_to_shared:
+        #FIXME: Assumes uses the name 't2' for the input basis coeffs
         kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell', ['t2'])
         kernel = loopy.assignment_to_subst(kernel, 't2')
-
-    if matvec1_parallelize_across == 'row':
-        pass
-    elif matvec1_parallelize_across == 'column':
-        pass
 
     # If this is set True then the following transformations must be performed
     # 1. Use scalars instead of arrays for the variables produced in
@@ -676,36 +678,59 @@ def transform(kernel, callables_table, ncells_per_group=32,
     # SCPT.
 
     # compute tile lengths
-    matvec1_row_tile_length = (nquad // matvec1_rowtiles) + 1
-    matvec1_col_tile_length = (nbasis // matvec1_coltiles) + 1
-    matvec2_row_tile_length = (nbasis // matvec2_rowtiles) + 1
-    matvec2_col_tile_length = (nquad // matvec2_coltiles) + 1
+    matvec1_row_tile_length = math.ceil(nquad // matvec1_rowtiles)
+    matvec1_col_tile_length = math.ceil(nbasis // matvec1_coltiles)
+    matvec2_row_tile_length = math.ceil(nbasis // matvec2_rowtiles)
+    matvec2_col_tile_length = math.ceil(nquad // matvec2_coltiles)
 
     # Splitting for tiles in matvec1
-    kernel = loopy.split_iname(kernel, 'form_ip_quad', matvec1_row_tile_length,
-            outer_iname='irowtile_matvec1')
-    kernel = loopy.split_iname(kernel, 'form_i', matvec1_col_tile_length,
-            outer_iname='icoltile_matvec1')
+    kernel = loopy.split_iname(kernel, 'form_ip_quad', matvec1_row_tile_length, outer_iname='irowtile_matvec1')
+    kernel = loopy.split_iname(kernel, 'form_i', matvec1_col_tile_length, outer_iname='icoltile_matvec1')
 
     if matvec1_parallelize_across == 'row':
-        kernel = loopy.split_iname(kernel, 'form_ip_quad_inner',
-                nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.split_iname(kernel, 'form_ip_quad_inner', nthreads_per_cell, inner_tag="l.0")
     else:
         raise NotImplementedError()
 
     # Splitting for tiles in matvec2
-    kernel = loopy.split_iname(kernel, 'form_j', matvec2_row_tile_length,
-            outer_iname='irowtile_matvec2')
-    kernel = loopy.split_iname(kernel, 'form_ip_basis', matvec2_col_tile_length,
-            outer_iname='icoltile_matvec2')
+    kernel = loopy.split_iname(kernel, 'form_j', matvec2_row_tile_length, outer_iname='irowtile_matvec2')
+    kernel = loopy.split_iname(kernel, 'form_ip_basis', matvec2_col_tile_length, outer_iname='icoltile_matvec2')
 
     if matvec2_parallelize_across == 'row':
-        kernel = loopy.split_iname(kernel, 'form_j_inner',
-                nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.split_iname(kernel, 'form_j_inner', nthreads_per_cell, inner_tag="l.0")
     else:
         raise NotImplementedError()
 
-    kernel = loopy.tag_inames(kernel, "icell:l.1, igroup:g.0")
+    print(kernel)
+    1/0
+
+    if prefetch_tiles:
+        #FIXME: Assuming that in all the constants the one with single axis is
+        # the one corresponding to quadrature weights. fix it by passing some
+        # metadata from TSFC.
+
+        #FIXME: Fill this
+        sweep_inames = {}
+        assert sweep_inames
+        vars_to_be_prefetched = [tv.name for tv in old_temps.values() if
+                tv.initializer is not None]
+        for var_name in vars_to_be_prefetched:
+            from loopy.transform.data import add_prefetch_for_single_kernel
+
+            kernel = add_prefetch_for_single_kernel(kernel, callables_table,
+                    var_name=var_name,
+                    sweep_inames=sweep_inames[var_name],
+                    precompute_outer_inames=frozenset(["ichunk_quad"]),
+                    temporary_address_space=loopy.AddressSpace.LOCAL,
+                    precompute_inames=precompute_inames,
+                    temporary_name='%s_temp' % subst,
+                    compute_insn_id='copy_%s' % subst,
+                    default_tag=None)
+
+    #TODO: Apply the precompute logic here
+    # Need to first get the names of the substitutions
+
+    kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
 
     # {{{ mico-optimizations
 
@@ -716,10 +741,13 @@ def transform(kernel, callables_table, ncells_per_group=32,
     if remove_func_eval_arrays:
         raise NotImplementedError()
 
+    # Should trigger when matvec1_parallelize_across = 'col'
+    # Then no need to put the LHS into shared memory.
+    do_not_prefetch_lhs = False
+    if do_not_prefetch_lhs:
+        raise NotImplementedError()
+
     # }}}
-
-
-
 
     print(kernel)
     1/0
@@ -775,7 +803,12 @@ def generate_cuda_kernel(program, extruded=False):
         kernel = loopy.assume(kernel, "end > 0")
 
         # choose the preferred algorithm here
-        kernel, args_to_make_global = transform(kernel, program.callables_table)
+        kernel, args_to_make_global = transform(kernel, program.callables_table,
+                matvec1_parallelize_across='row',
+                matvec2_parallelize_across='row',
+                matvec1_rowtiles=1, matvec1_coltiles=2,
+                matvec2_rowtiles=3, matvec2_coltiles=1,
+                prefetch_tiles=True,)
 
         # kernel = transpose_maps(kernel)
     else:
