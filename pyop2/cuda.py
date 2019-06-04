@@ -61,7 +61,7 @@ from pyop2.mpi import collective
 from pyop2.profiling import timed_region, timed_function
 from pyop2.utils import cached_property, get_petsc_dir
 from pyop2.configuration import configuration
-from pyop2.logger import ExecTimeNoter
+from pyop2.logger import ExecTimeNoter, INFO, log
 
 import loopy
 import pycuda
@@ -601,6 +601,30 @@ def transform(kernel, callables_table, ncells_per_group=32,
 
     # }}}
 
+    # {{{ privatize temps for function evals
+
+    # This helps to apply transformations separately to the basis part and the
+    # quadrature part
+
+    evaluation_variables = [insn.assignee.name for insn in kernel.instructions
+            if 'quad_wrap_up' in insn.tags]
+    kernel = loopy.privatize_temporaries_with_inames(kernel, 'form_ip',
+            evaluation_variables)
+
+    # }}}
+
+    # {{{ change address space of constants to '__global'
+
+    old_temps = kernel.temporary_variables.copy()
+    args_to_make_global = [tv.initializer.flatten() for tv in old_temps.values() if tv.initializer is not None]
+
+    new_temps = dict((tv.name, tv) for tv in old_temps.values() if tv.initializer is None)
+    kernel = kernel.copy(
+            args=kernel.args+[tv.copy(initializer=None) for tv in old_temps.values() if tv.initializer is not None],
+            temporary_variables=new_temps)
+
+    # }}}
+
     #FIXME: Assumes the variable associated with output is 't0'. GENERALIZE THIS!
     kernel = loopy.remove_instructions(kernel, "writes:t0 and tag:gather")
     kernel = loopy.remove_instructions(kernel, "tag:quad_init")
@@ -611,19 +635,96 @@ def transform(kernel, callables_table, ncells_per_group=32,
 
     from loopy.loop import fuse_loop_domains
     kernel = fuse_loop_domains(kernel)
-    kernel = loopy.fold_constants(kernel)
 
     from loopy.transform.data import remove_unused_axes_in_temporaries
     kernel = remove_unused_axes_in_temporaries(kernel)
 
+    # {{{ remove noops
+
+    noop_insns = set([insn.id for insn in kernel.instructions if
+            isinstance(insn, loopy.NoOpInstruction)])
+    kernel = loopy.remove_instructions(kernel, noop_insns)
+
+    # }}}
+
+    kernel = loopy.split_iname(kernel, "n", ncells_per_group*nthreads_per_cell,
+            outer_iname="igroup", inner_iname="icell")
+    kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:quadrature",
+            "form_ip_quad")
+    kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:basis",
+            "form_ip_basis")
+
     if load_coordinates_to_shared:
-        raise NotImplementedError()
+        kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell', ['t1'])
+        kernel = loopy.assignment_to_subst(kernel, 't1')
 
     if load_input_to_shared:
+        kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell', ['t2'])
+        kernel = loopy.assignment_to_subst(kernel, 't2')
+
+    if matvec1_parallelize_across == 'row':
+        pass
+    elif matvec1_parallelize_across == 'column':
+        pass
+
+    # If this is set True then the following transformations must be performed
+    # 1. Use scalars instead of arrays for the variables produced in
+    #    quad_wrap_up.
+    # 2. Use the same iname for 'form_ip_basis', 'form_ip_quad'
+    #
+    # These would be the micro-optimization to use less register space for
+    # SCPT.
+
+    # compute tile lengths
+    matvec1_row_tile_length = (nquad // matvec1_rowtiles) + 1
+    matvec1_col_tile_length = (nbasis // matvec1_coltiles) + 1
+    matvec2_row_tile_length = (nbasis // matvec2_rowtiles) + 1
+    matvec2_col_tile_length = (nquad // matvec2_coltiles) + 1
+
+    # Splitting for tiles in matvec1
+    kernel = loopy.split_iname(kernel, 'form_ip_quad', matvec1_row_tile_length,
+            outer_iname='irowtile_matvec1')
+    kernel = loopy.split_iname(kernel, 'form_i', matvec1_col_tile_length,
+            outer_iname='icoltile_matvec1')
+
+    if matvec1_parallelize_across == 'row':
+        kernel = loopy.split_iname(kernel, 'form_ip_quad_inner',
+                nthreads_per_cell, inner_tag="l.0")
+    else:
         raise NotImplementedError()
+
+    # Splitting for tiles in matvec2
+    kernel = loopy.split_iname(kernel, 'form_j', matvec2_row_tile_length,
+            outer_iname='irowtile_matvec2')
+    kernel = loopy.split_iname(kernel, 'form_ip_basis', matvec2_col_tile_length,
+            outer_iname='icoltile_matvec2')
+
+    if matvec2_parallelize_across == 'row':
+        kernel = loopy.split_iname(kernel, 'form_j_inner',
+                nthreads_per_cell, inner_tag="l.0")
+    else:
+        raise NotImplementedError()
+
+    kernel = loopy.tag_inames(kernel, "icell:l.1, igroup:g.0")
+
+    # {{{ mico-optimizations
+
+    #FIXME: Need to set the variables 'remove_func_eval_arrays' depending on
+    # the input parameters to 'transform'
+    # So, currently we don't support this
+    remove_func_eval_arrays = False
+    if remove_func_eval_arrays:
+        raise NotImplementedError()
+
+    # }}}
+
+
+
 
     print(kernel)
     1/0
+
+    return kernel, args_to_make_global
 
 
 def transpose_maps(kernel):
