@@ -605,11 +605,13 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     # {{{ privatize temps for function evals
 
+    #FIXME: Need these variables from TSFC's metadata
     # This helps to apply transformations separately to the basis part and the
     # quadrature part
 
-    evaluation_variables = [insn.assignee.name for insn in kernel.instructions
-            if 'quad_wrap_up' in insn.tags]
+    evaluation_variables = (set().union(*[insn.write_dependency_names() for insn in kernel.instructions if 'quad_wrap_up' in insn.tags])
+            & set().union(*[insn.read_dependency_names() for insn in kernel.instructions if 'basis' in insn.tags]))
+
     kernel = loopy.privatize_temporaries_with_inames(kernel, 'form_ip',
             evaluation_variables)
 
@@ -654,10 +656,8 @@ def transform(kernel, callables_table, ncells_per_block=32,
             outer_iname="iblock", inner_iname="icell")
 
     # Duplicate inames to separate transformation logic for quadrature and basis part
-    kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:quadrature",
-            "form_ip_quad")
-    kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:basis",
-            "form_ip_basis")
+    kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:quadrature", "form_ip_quad")
+    kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:basis", "form_ip_basis")
 
     if load_coordinates_to_shared:
         #FIXME: Assumes uses the name 't1' for coordinates
@@ -701,31 +701,63 @@ def transform(kernel, callables_table, ncells_per_block=32,
     else:
         raise NotImplementedError()
 
-    print(kernel)
-    1/0
-
     if prefetch_tiles:
+        from loopy.transform.data import add_prefetch_for_single_kernel
         #FIXME: Assuming that in all the constants the one with single axis is
         # the one corresponding to quadrature weights. fix it by passing some
         # metadata from TSFC.
+        const_matrices_names = [tv.name for tv in old_temps.values() if
+                tv.initializer is not None and len(tv.shape)>1]
+        quad_weights, = [tv.name for tv in old_temps.values() if tv.initializer
+                is not None and len(tv.shape) == 1]
 
-        #FIXME: Fill this
-        sweep_inames = {}
-        assert sweep_inames
-        vars_to_be_prefetched = [tv.name for tv in old_temps.values() if
-                tv.initializer is not None]
-        for var_name in vars_to_be_prefetched:
-            from loopy.transform.data import add_prefetch_for_single_kernel
+        cnst_mtrix_prftch_shape = (max(matvec1_row_tile_length*matvec1_col_tile_length,
+                matvec2_row_tile_length*matvec2_col_tile_length),)
+        new_temps = kernel.temporary_variables.copy()
+        new_temps['cnst_mtrix_prftch'] = loopy.TemporaryVariable(
+                name='cnst_mtrix_prftch', shape=cnst_mtrix_prftch_shape,
+                address_space=loopy.AddressSpace.LOCAL)
+        kernel = kernel.copy(temporary_variables=new_temps)
+        print(kernel)
+        1/0
 
-            kernel = add_prefetch_for_single_kernel(kernel, callables_table,
-                    var_name=var_name,
-                    sweep_inames=sweep_inames[var_name],
-                    precompute_outer_inames=frozenset(["ichunk_quad"]),
-                    temporary_address_space=loopy.AddressSpace.LOCAL,
-                    precompute_inames=precompute_inames,
-                    temporary_name='%s_temp' % subst,
-                    compute_insn_id='copy_%s' % subst,
-                    default_tag=None)
+        # prefetching in the quad part
+        prefetch_inames = {}
+        # prefetching the tile in quadrature part
+        sweep_inames = 1/0
+        fetch_outer_inames = 1/0
+        var_name = const_matrices_names[0]
+        vng = kernel.var_name_generator()
+        prefetch_inames[var_name] = [vng("iprftch") for _ in old_temps[var_name].shape]
+
+        kernel = add_prefetch_for_single_kernel(kernel, callables_table,
+                var_name=var_name,
+                sweep_inames=sweep_inames,  # Need this
+                fetch_outer_inames=fetch_outer_inames,
+                temporary_address_space=loopy.AddressSpace.LOCAL,
+                dim_arg_names=prefetch_inames[var_name],
+                temporary_name='cnst_mtrix_prftch',
+                compute_insn_id='quad_prftch_insn',
+                default_tag=None,
+                within="tags:quad_redn")
+
+        # prefetching in the basis part
+        var_name = const_matrices_names[-1]
+        sweep_inames = 1/0
+        fetch_outer_inames = 1/0
+        vng = kernel.var_name_generator()
+        prefetch_inames[var_name] = [vng("iprftch") for _ in old_temps[var_name].shape]
+
+        kernel = add_prefetch_for_single_kernel(kernel, callables_table,
+                var_name=var_name,
+                sweep_inames=sweep_inames[var_name],  # Need this
+                fetch_outer_inames=fetch_outer_inames[var_name],
+                temporary_address_space=loopy.AddressSpace.LOCAL,
+                prefetch_inames=prefetch_inames[var_name],
+                temporary_name='cnst_mtrix_prftch',
+                compute_insn_id='basis_prftch_insn',
+                default_tag=None,
+                within="tags:quad_redn")
 
     #TODO: Apply the precompute logic here
     # Need to first get the names of the substitutions
@@ -807,7 +839,7 @@ def generate_cuda_kernel(program, extruded=False):
                 matvec1_parallelize_across='row',
                 matvec2_parallelize_across='row',
                 matvec1_rowtiles=1, matvec1_coltiles=2,
-                matvec2_rowtiles=3, matvec2_coltiles=1,
+                matvec2_rowtiles=2, matvec2_coltiles=1,
                 prefetch_tiles=True,)
 
         # kernel = transpose_maps(kernel)
