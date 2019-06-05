@@ -683,6 +683,13 @@ def transform(kernel, callables_table, ncells_per_block=32,
     matvec2_row_tile_length = math.ceil(nbasis // matvec2_rowtiles)
     matvec2_col_tile_length = math.ceil(nquad // matvec2_coltiles)
 
+    inner_iteration_length_produced = n_tilecomputes_to_store_after*matvec1_row_tile_length
+    kernel = loopy.split_iname(kernel, "form_ip_quad", inner_iteration_length_produced, outer_iname="istore_tile")
+    kernel = loopy.split_iname(kernel, "form_ip_basis",
+            inner_iteration_length_produced, outer_iname="istore_tile_0")
+    kernel = loopy.rename_iname(kernel, "istore_tile_0", "istore_tile",
+            existing_ok=True)
+
     # Splitting for tiles in matvec1
     kernel = loopy.split_iname(kernel, 'form_ip_quad', matvec1_row_tile_length, outer_iname='irowtile_matvec1')
     kernel = loopy.split_iname(kernel, 'form_i', matvec1_col_tile_length, outer_iname='icoltile_matvec1')
