@@ -788,28 +788,27 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     default_tag=None,
                     within="tag:basis_redn")
 
+        # prefetch the quadrature weights.
+        prefetch_inames = {}
+        prefetch_insns = {}
+
+        if matvec1_parallelize_across == 'row':
+            sweep_inames = ('form_ip_quad_inner_outer', 'form_ip_quad_inner_inner',)
+        else:
+            raise NotImplementedError()
+
+        kernel = add_prefetch_for_single_kernel(kernel, callables_table,
+                var_name=quad_weights,
+                sweep_inames=sweep_inames,
+                temporary_address_space=loopy.AddressSpace.PRIVATE,
+                temporary_name='cnst_quad_weight_prftch',
+                within="tag:quad_wrap_up")
+
         # Both of them would be a one-to-one-mapping
         # As the sizes of both of them would be the same.
         print(kernel)
         1/0
 
-        # prefetching in the basis part
-        var_name = const_matrices_names[-1]
-        sweep_inames = 1/0
-        fetch_outer_inames = 1/0
-        vng = kernel.var_name_generator()
-        prefetch_inames[var_name] = [vng("iprftch") for _ in old_temps[var_name].shape]
-
-        kernel = add_prefetch_for_single_kernel(kernel, callables_table,
-                var_name=var_name,
-                sweep_inames=sweep_inames[var_name],  # Need this
-                fetch_outer_inames=fetch_outer_inames[var_name],
-                temporary_address_space=loopy.AddressSpace.LOCAL,
-                prefetch_inames=prefetch_inames[var_name],
-                temporary_name='cnst_mtrix_prftch',
-                compute_insn_id='basis_prftch_insn',
-                default_tag=None,
-                within="tags:quad_redn")
 
     #TODO: Apply the precompute logic here
     # Need to first get the names of the substitutions
@@ -830,6 +829,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
     do_not_prefetch_lhs = False
     if do_not_prefetch_lhs:
         raise NotImplementedError()
+
+    # Again for SCPT we need the mico-optimization that we put the constant
+    # matrices into the constant memory for broadcasting purposes.
 
     # }}}
 
