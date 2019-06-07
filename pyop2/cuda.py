@@ -735,19 +735,14 @@ def transform(kernel, callables_table, ncells_per_block=32,
         else:
             raise NotImplementedError()
 
-        prefetch_insns = []
+        quad_prefetch_insns = []
 
         vng = kernel.get_var_name_generator()
         ing = kernel.get_instruction_id_generator()
-        quad_temp_names = [vng('cnst_mtrix_prftch') for _ in quad_const_matrices]
+        quad_temp_names = [vng('quad_cnst_mtrix_prftch') for _ in quad_const_matrices]
         prefetch_inames = [vng("iprftch") for _ in range(2)]
         for temp_name, var_name in zip(quad_temp_names, quad_const_matrices):
-            new_temps = kernel.temporary_variables.copy()
-            new_temps[temp_name] = loopy.TemporaryVariable(
-                    name=temp_name, shape=(100, 100),
-                    address_space=loopy.AddressSpace.LOCAL)
-            kernel = kernel.copy(temporary_variables=new_temps)
-            prefetch_insns.append(ing("quad_prftch_insn"))
+            quad_prefetch_insns.append(ing("quad_prftch_insn"))
 
             kernel = add_prefetch_for_single_kernel(kernel, callables_table,
                     var_name=var_name,
@@ -755,7 +750,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     temporary_address_space=loopy.AddressSpace.LOCAL,
                     dim_arg_names=prefetch_inames,
                     temporary_name=temp_name,
-                    compute_insn_id=prefetch_insns[-1],
+                    compute_insn_id=quad_prefetch_insns[-1],
                     default_tag=None,
                     within="tag:quad_redn")
 
@@ -775,23 +770,17 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
         basis_const_matrices = const_matrices_names & frozenset().union(*[insn.read_dependency_names() for insn in
             kernel.instructions if 'basis_redn' in insn.tags])
+        basis_temp_names = [vng('basis_cnst_mtrix_prftch') for _ in basis_const_matrices]
 
         if matvec2_parallelize_across == 'row':
             sweep_inames = ('form_j_inner_outer', 'form_j_inner_inner', 'form_ip_basis_inner')
         else:
             raise NotImplementedError()
 
-        prefetch_insns = {}
-        basis_temp_names = quad_temp_names + [vng('cnst_mtrix_prftch') for _ in
-                range(len(basis_const_matrices)-len(quad_const_matrices))]
+        basis_prefetch_insns = []
         prefetch_inames = [vng("iprftch") for _ in range(2)]
         for temp_name, var_name in zip(basis_temp_names, basis_const_matrices):
-            new_temps = kernel.temporary_variables.copy()
-            new_temps[temp_name] = loopy.TemporaryVariable(
-                    name=temp_name, shape=(100, 100),
-                    address_space=loopy.AddressSpace.LOCAL)
-            kernel = kernel.copy(temporary_variables=new_temps)
-            prefetch_insns[var_name] = ing("basis_prftch_insn")
+            basis_prefetch_insns.append(ing("basis_prftch_insn"))
 
             kernel = add_prefetch_for_single_kernel(kernel, callables_table,
                     var_name=var_name,
@@ -799,7 +788,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     temporary_address_space=loopy.AddressSpace.LOCAL,
                     dim_arg_names=prefetch_inames,
                     temporary_name=temp_name,
-                    compute_insn_id=prefetch_insns[var_name],
+                    compute_insn_id=basis_prefetch_insns[-1],
                     default_tag=None,
                     within="tag:basis_redn")
 
@@ -813,32 +802,40 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
         # {{{ Prefetch: Quad Weights
 
-        prefetch_insns = {}
+        quad_weight_prefetch_insns = []
 
         if matvec1_parallelize_across == 'row':
             sweep_inames = ('form_ip_quad_inner_outer', 'form_ip_quad_inner_inner',)
         else:
             raise NotImplementedError()
+        quad_weight_prefetch_insns.append(ing("basis_prftch_insn"))
 
         kernel = add_prefetch_for_single_kernel(kernel, callables_table,
                 var_name=quad_weights,
                 sweep_inames=sweep_inames,
                 temporary_address_space=loopy.AddressSpace.PRIVATE,
                 temporary_name='cnst_quad_weight_prftch',
+                compute_insn_id=quad_weight_prefetch_insns[-1],
                 within="tag:quad_wrap_up")
         # }}}
 
-        #FIXME; Those 2 matrices should have different names into which they
-        # are prefetched.
+        # {{{ Adding dependency between the prefetch instructions
 
-        # kernel = flatten_variable(kernel, quad_const_matrices)
-        # kernel = flatten_variable(kernel, basis_const_matrices)
-        # from loopy.kernel.data import flatten_variable, absorb_temporary_into
-        # kernel = absorb_temporary_into(kernel, temp_in_quad, temp_basis)
-        #FIXME: correct these things
-        # Only then remove the following 1/0
+        kernel = loopy.add_dependency(kernel,
+                " or ".join("id:{}".format(insn_id) for insn_id in
+                    basis_prefetch_insns), "tag:quadrature")
 
-        1/0
+        # }}}
+
+        from loopy.transform.data import flatten_variable, absorb_temporary_into
+        for var_name in quad_temp_names+basis_temp_names:
+            kernel = flatten_variable(kernel, var_name)
+        for quad_temp_name, basis_temp_name in zip(quad_temp_names,
+                basis_temp_names):
+            if (matvec2_row_tile_length*matvec2_col_tile_length >= matvec1_row_tile_length*matvec1_col_tile_length):
+                kernel = absorb_temporary_into(kernel, basis_temp_name, quad_temp_name)
+            else:
+                kernel = absorb_temporary_into(kernel, quad_temp_name, basis_temp_name)
 
     kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
 
@@ -861,6 +858,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # matrices into the constant memory for broadcasting purposes.
 
     # }}}
+    1/0
 
     return kernel, args_to_make_global
 
