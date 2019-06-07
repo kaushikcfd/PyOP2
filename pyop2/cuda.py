@@ -522,8 +522,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
         n_tilecomputes_to_store_after=1,
         load_coordinates_to_shared=False,
         load_input_to_shared=False,
-        prefetch_tiles=True
-        ):
+        prefetch_tiles=True):
 
     # {{{ sanity checks
 
@@ -603,7 +602,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     # }}}
 
-    # {{{ privatize temps for function evals
+    # {{{ privatize temps for function evals and make them LOCAL
 
     #FIXME: Need these variables from TSFC's metadata
     # This helps to apply transformations separately to the basis part and the
@@ -614,6 +613,11 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     kernel = loopy.privatize_temporaries_with_inames(kernel, 'form_ip',
             evaluation_variables)
+    new_temps = kernel.temporary_variables.copy()
+    for eval_var in evaluation_variables:
+        new_temps[eval_var] = new_temps[eval_var].copy(
+                address_space=loopy.AddressSpace.LOCAL)
+    kernel = kernel.copy(temporary_variables=new_temps)
 
     # }}}
 
@@ -717,10 +721,13 @@ def transform(kernel, callables_table, ncells_per_block=32,
         #FIXME: Assuming that in all the constants the one with single axis is
         # the one corresponding to quadrature weights. fix it by passing some
         # metadata from TSFC.
+        # FIXME: Sweep inames depends on the parallelization strategies for
+        # both the matvecs, that needs to be taken care of.
         const_matrices_names = set([tv.name for tv in old_temps.values() if tv.initializer is not None and len(tv.shape)>1])
         quad_weights, = [tv.name for tv in old_temps.values() if tv.initializer is not None and len(tv.shape) == 1]
 
-        # Prefetching: QUAD PART
+        # {{{ Prefetching: QUAD PART
+
         quad_const_matrices = const_matrices_names & frozenset().union(*[insn.read_dependency_names() for insn in
             kernel.instructions if 'quad_redn' in insn.tags])
         if matvec1_parallelize_across == 'row':
@@ -728,48 +735,56 @@ def transform(kernel, callables_table, ncells_per_block=32,
         else:
             raise NotImplementedError()
 
-        prefetch_inames = {}
-        prefetch_insns = {}
+        prefetch_insns = []
 
         vng = kernel.get_var_name_generator()
         ing = kernel.get_instruction_id_generator()
         quad_temp_names = [vng('cnst_mtrix_prftch') for _ in quad_const_matrices]
-        quad_prefetch_inames = [vng("iprftch") for _ in range(2)]
+        prefetch_inames = [vng("iprftch") for _ in range(2)]
         for temp_name, var_name in zip(quad_temp_names, quad_const_matrices):
             new_temps = kernel.temporary_variables.copy()
             new_temps[temp_name] = loopy.TemporaryVariable(
                     name=temp_name, shape=(100, 100),
                     address_space=loopy.AddressSpace.LOCAL)
             kernel = kernel.copy(temporary_variables=new_temps)
-            prefetch_insns[var_name] = ing("quad_prftch_insn")
+            prefetch_insns.append(ing("quad_prftch_insn"))
 
             kernel = add_prefetch_for_single_kernel(kernel, callables_table,
                     var_name=var_name,
                     sweep_inames=sweep_inames,
                     temporary_address_space=loopy.AddressSpace.LOCAL,
-                    dim_arg_names=quad_prefetch_inames,
+                    dim_arg_names=prefetch_inames,
                     temporary_name=temp_name,
-                    compute_insn_id=prefetch_insns[var_name],
+                    compute_insn_id=prefetch_insns[-1],
                     default_tag=None,
                     within="tag:quad_redn")
 
-        # Prefetching the basis variables
+        #FIXME: In order to save on compilation time we are not sticking to
+        # coalesced accesses Otherwise we should join the following inames and
+        # then split into nthreads_per_cell
+
+        if matvec1_parallelize_across == 'row':
+            kernel = loopy.split_iname(kernel, prefetch_inames[1], nthreads_per_cell)
+            kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1", prefetch_inames[1]+"_inner": "l.0"})
+        else:
+            raise NotImplementedError()
+
+        # }}}
+
+        # {{{ Prefetching: BASIS PART
+
         basis_const_matrices = const_matrices_names & frozenset().union(*[insn.read_dependency_names() for insn in
             kernel.instructions if 'basis_redn' in insn.tags])
 
-        # prefetching the tile in quadrature part
         if matvec2_parallelize_across == 'row':
             sweep_inames = ('form_j_inner_outer', 'form_j_inner_inner', 'form_ip_basis_inner')
         else:
             raise NotImplementedError()
 
-        prefetch_inames = {}
         prefetch_insns = {}
-
         basis_temp_names = quad_temp_names + [vng('cnst_mtrix_prftch') for _ in
                 range(len(basis_const_matrices)-len(quad_const_matrices))]
-
-        basis_prefetch_inames = [vng("iprftch") for _ in range(2)]
+        prefetch_inames = [vng("iprftch") for _ in range(2)]
         for temp_name, var_name in zip(basis_temp_names, basis_const_matrices):
             new_temps = kernel.temporary_variables.copy()
             new_temps[temp_name] = loopy.TemporaryVariable(
@@ -782,14 +797,22 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     var_name=var_name,
                     sweep_inames=sweep_inames,
                     temporary_address_space=loopy.AddressSpace.LOCAL,
-                    dim_arg_names=basis_prefetch_inames,
+                    dim_arg_names=prefetch_inames,
                     temporary_name=temp_name,
                     compute_insn_id=prefetch_insns[var_name],
                     default_tag=None,
                     within="tag:basis_redn")
 
-        # prefetch the quadrature weights.
-        prefetch_inames = {}
+        if matvec2_parallelize_across == 'row':
+            kernel = loopy.split_iname(kernel, prefetch_inames[1], nthreads_per_cell)
+            kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1", prefetch_inames[1]+"_inner": "l.0"})
+        else:
+            raise NotImplementedError()
+
+        # }}}
+
+        # {{{ Prefetch: Quad Weights
+
         prefetch_insns = {}
 
         if matvec1_parallelize_across == 'row':
@@ -803,15 +826,19 @@ def transform(kernel, callables_table, ncells_per_block=32,
                 temporary_address_space=loopy.AddressSpace.PRIVATE,
                 temporary_name='cnst_quad_weight_prftch',
                 within="tag:quad_wrap_up")
+        # }}}
 
-        # Both of them would be a one-to-one-mapping
-        # As the sizes of both of them would be the same.
-        print(kernel)
+        #FIXME; Those 2 matrices should have different names into which they
+        # are prefetched.
+
+        # kernel = flatten_variable(kernel, quad_const_matrices)
+        # kernel = flatten_variable(kernel, basis_const_matrices)
+        # from loopy.kernel.data import flatten_variable, absorb_temporary_into
+        # kernel = absorb_temporary_into(kernel, temp_in_quad, temp_basis)
+        #FIXME: correct these things
+        # Only then remove the following 1/0
+
         1/0
-
-
-    #TODO: Apply the precompute logic here
-    # Need to first get the names of the substitutions
 
     kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
 
@@ -834,9 +861,6 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # matrices into the constant memory for broadcasting purposes.
 
     # }}}
-
-    print(kernel)
-    1/0
 
     return kernel, args_to_make_global
 
