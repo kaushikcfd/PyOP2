@@ -732,6 +732,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
             kernel.instructions if 'quad_redn' in insn.tags])
         if matvec1_parallelize_across == 'row':
             sweep_inames = ('form_ip_quad_inner_outer', 'form_ip_quad_inner_inner', 'form_i_inner')
+            fetch_outer_inames = 'iblock,istore_tile,icoltile_matvec1,irowtile_matvec1'
         else:
             raise NotImplementedError()
 
@@ -751,6 +752,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     dim_arg_names=prefetch_inames,
                     temporary_name=temp_name,
                     compute_insn_id=quad_prefetch_insns[-1],
+                    fetch_outer_inames=fetch_outer_inames,
                     default_tag=None,
                     within="tag:quad_redn")
 
@@ -774,6 +776,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
         if matvec2_parallelize_across == 'row':
             sweep_inames = ('form_j_inner_outer', 'form_j_inner_inner', 'form_ip_basis_inner')
+            fetch_outer_inames = 'iblock,istore_tile,icoltile_matvec2,irowtile_matvec2'
         else:
             raise NotImplementedError()
 
@@ -789,6 +792,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     dim_arg_names=prefetch_inames,
                     temporary_name=temp_name,
                     compute_insn_id=basis_prefetch_insns[-1],
+                    fetch_outer_inames=fetch_outer_inames,
                     default_tag=None,
                     within="tag:basis_redn")
 
@@ -806,6 +810,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
         if matvec1_parallelize_across == 'row':
             sweep_inames = ('form_ip_quad_inner_outer', 'form_ip_quad_inner_inner',)
+            fetch_outer_inames = 'istore_tile, irowtile_matvec1, icell, iblock'
         else:
             raise NotImplementedError()
         quad_weight_prefetch_insns.append(ing("basis_prftch_insn"))
@@ -816,6 +821,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
                 temporary_address_space=loopy.AddressSpace.PRIVATE,
                 temporary_name='cnst_quad_weight_prftch',
                 compute_insn_id=quad_weight_prefetch_insns[-1],
+                fetch_outer_inames=fetch_outer_inames,
                 within="tag:quad_wrap_up")
         # }}}
 
@@ -858,6 +864,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # matrices into the constant memory for broadcasting purposes.
 
     # }}}
+
+    #FIXME: Need to fix the shape of t0 to whatever portion we are editing.
+    # the address space of t0 depends on the parallelization strategy.
     1/0
 
     return kernel, args_to_make_global
@@ -942,8 +951,8 @@ def generate_cuda_kernel(program, extruded=False):
 
     if program.name == configuration["cuda_jitmodule_name"]:
         print("Generated code")
-        # print(code)
-        # 1/0
+        print(code)
+        1/0
         pass
         # with open('current_kernel.cu', 'w') as f:
         #     # code = f.read()
