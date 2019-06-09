@@ -658,6 +658,8 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # Realize CUDA blocks
     kernel = loopy.split_iname(kernel, "n", ncells_per_block*nthreads_per_cell,
             outer_iname="iblock", inner_iname="icell")
+    #FIXME: Do not use hard-coded inames, this change should also be in TSFC.
+    kernel = loopy.rename_iname(kernel, "i8", "form_j", True)
 
     # Duplicate inames to separate transformation logic for quadrature and basis part
     kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:quadrature", "form_ip_quad")
@@ -667,19 +669,13 @@ def transform(kernel, callables_table, ncells_per_block=32,
         #FIXME: Assumes uses the name 't1' for coordinates
         kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell', ['t1'])
         kernel = loopy.assignment_to_subst(kernel, 't1')
+        raise NotImplementedError()
 
     if load_input_to_shared:
         #FIXME: Assumes uses the name 't2' for the input basis coeffs
         kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell', ['t2'])
         kernel = loopy.assignment_to_subst(kernel, 't2')
-
-    # If this is set True then the following transformations must be performed
-    # 1. Use scalars instead of arrays for the variables produced in
-    #    quad_wrap_up.
-    # 2. Use the same iname for 'form_ip_basis', 'form_ip_quad'
-    #
-    # These would be the micro-optimization to use less register space for
-    # SCPT.
+        raise NotImplementedError()
 
     # compute tile lengths
     matvec1_row_tile_length = math.ceil(nquad // matvec1_rowtiles)
@@ -804,25 +800,33 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
         # }}}
 
-        # {{{ Prefetch: Quad Weights
+        # {{{ Prefetch: Quad Weights(Set to false now)
 
-        quad_weight_prefetch_insns = []
+        # Unless we load this into the shared memory and do a collective read
+        # in a block, this is no good. As the quad weights are accessed only
+        # once. So the only way prefetching would help is through a
+        # parallelized read.
 
-        if matvec1_parallelize_across == 'row':
-            sweep_inames = ('form_ip_quad_inner_outer', 'form_ip_quad_inner_inner',)
-            fetch_outer_inames = 'istore_tile, irowtile_matvec1, icell, iblock'
-        else:
-            raise NotImplementedError()
-        quad_weight_prefetch_insns.append(ing("basis_prftch_insn"))
+        prefetch_quad_weights = False
 
-        kernel = add_prefetch_for_single_kernel(kernel, callables_table,
-                var_name=quad_weights,
-                sweep_inames=sweep_inames,
-                temporary_address_space=loopy.AddressSpace.PRIVATE,
-                temporary_name='cnst_quad_weight_prftch',
-                compute_insn_id=quad_weight_prefetch_insns[-1],
-                fetch_outer_inames=fetch_outer_inames,
-                within="tag:quad_wrap_up")
+        if prefetch_quad_weights:
+            quad_weight_prefetch_insns = []
+
+            if matvec1_parallelize_across == 'row':
+                sweep_inames = ('form_ip_quad_inner_outer', 'form_ip_quad_inner_inner',)
+                fetch_outer_inames = 'istore_tile, irowtile_matvec1, icell, iblock'
+            else:
+                raise NotImplementedError()
+            quad_weight_prefetch_insns.append(ing("basis_prftch_insn"))
+
+            kernel = add_prefetch_for_single_kernel(kernel, callables_table,
+                    var_name=quad_weights,
+                    sweep_inames=sweep_inames,
+                    temporary_address_space=loopy.AddressSpace.PRIVATE,
+                    temporary_name='cnst_quad_weight_prftch',
+                    compute_insn_id=quad_weight_prefetch_insns[-1],
+                    fetch_outer_inames=fetch_outer_inames,
+                    within="tag:quad_wrap_up")
         # }}}
 
         # {{{ Adding dependency between the prefetch instructions
@@ -843,6 +847,19 @@ def transform(kernel, callables_table, ncells_per_block=32,
             else:
                 kernel = absorb_temporary_into(kernel, quad_temp_name, basis_temp_name)
 
+        if matvec1_parallelize_across == 'row':
+            kernel = loopy.duplicate_inames(kernel, 'icoltile_matvec1', within='id:quad_prftch_insn*')
+        else:
+            raise NotImplementedError()
+
+        if matvec2_parallelize_across == 'row':
+            kernel = loopy.duplicate_inames(kernel, 'icoltile_matvec2', within='id:basis_prftch_insn*')
+        else:
+            raise NotImplementedError()
+
+        kernel = loopy.add_dependency(kernel, 'tag:quad_redn', 'id:quad_prftch_insn*')
+        kernel = loopy.add_dependency(kernel, 'tag:basis_redn', 'id:basis_prftch_insn*')
+
     kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
 
     # {{{ mico-optimizations
@@ -850,6 +867,14 @@ def transform(kernel, callables_table, ncells_per_block=32,
     #FIXME: Need to set the variables 'remove_func_eval_arrays' depending on
     # the input parameters to 'transform'
     # So, currently we don't support this
+    # If 'remove_func_eval_arrays' is set True then the following transformations must be performed
+    # 1. Use scalars instead of arrays for the variables produced in
+    #    quad_wrap_up.
+    # 2. Use the same iname for 'form_ip_basis', 'form_ip_quad'
+    #
+    # These would be the micro-optimization to use less register space for
+    # SCPT.
+
     remove_func_eval_arrays = False
     if remove_func_eval_arrays:
         raise NotImplementedError()
@@ -867,7 +892,8 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     #FIXME: Need to fix the shape of t0 to whatever portion we are editing.
     # the address space of t0 depends on the parallelization strategy.
-    1/0
+    print(kernel)
+    1./0
 
     return kernel, args_to_make_global
 
