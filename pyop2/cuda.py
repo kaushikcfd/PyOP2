@@ -834,17 +834,26 @@ def transform(kernel, callables_table, ncells_per_block=32,
                 kernel = absorb_temporary_into(kernel, quad_temp_name, basis_temp_name)
 
         if matvec1_parallelize_across == 'row':
-            kernel = loopy.duplicate_inames(kernel, 'icoltile_matvec1', within='id:quad_prftch_insn*')
+            pass
+            # kernel = loopy.duplicate_inames(kernel, 'icoltile_matvec1', within='id:quad_prftch_insn*')
         else:
             raise NotImplementedError()
 
         if matvec2_parallelize_across == 'row':
-            kernel = loopy.duplicate_inames(kernel, 'icoltile_matvec2', within='id:basis_prftch_insn*')
+            pass
+            # kernel = loopy.duplicate_inames(kernel, 'icoltile_matvec2', within='id:basis_prftch_insn*')
         else:
             raise NotImplementedError()
 
         kernel = loopy.add_dependency(kernel, 'tag:quad_redn', 'id:quad_prftch_insn*')
         kernel = loopy.add_dependency(kernel, 'tag:basis_redn', 'id:basis_prftch_insn*')
+
+        # do not enforce any dependency between the basis reductions and the
+        # quadrature reductions.
+
+        kernel = loopy.remove_dependency(kernel, 'tag:quad_redn', 'tag:quad_redn')
+        kernel = loopy.remove_dependency(kernel, 'tag:basis_redn', 'tag:basis_redn')
+        kernel = loopy.add_dependency(kernel, 'tag:quad_wrap_up', 'tag:quad_redn')
 
     kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
 
@@ -878,8 +887,11 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     #FIXME: Need to fix the shape of t0 to whatever portion we are editing.
     # the address space of t0 depends on the parallelization strategy.
-    print(kernel)
-    1./0
+    # from loopy.preprocess import realize_reduction_for_single_kernel
+    # kernel = realize_reduction_for_single_kernel(kernel, callables_table)
+    # print(kernel.id_to_insn['form_insn_14_icoltile_matvec1_form_i_inner_init'].within_inames)
+    # import pudb; pu.db
+    # 1./0
 
     return kernel, args_to_make_global
 
@@ -939,6 +951,10 @@ def generate_cuda_kernel(program, extruded=False):
                 matvec2_rowtiles=2, matvec2_coltiles=1,
                 prefetch_tiles=True,)
 
+        # FIXME: Once everything around this generalized transformation is
+        # handled, make this guy relive.
+        # If this does not hold up currently then we will have a kernel which
+        # would give us a wrong answer.
         # kernel = transpose_maps(kernel)
     else:
         # batch cells into groups
