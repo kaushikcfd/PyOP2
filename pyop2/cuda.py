@@ -887,11 +887,22 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     #FIXME: Need to fix the shape of t0 to whatever portion we are editing.
     # the address space of t0 depends on the parallelization strategy.
-    # from loopy.preprocess import realize_reduction_for_single_kernel
-    # kernel = realize_reduction_for_single_kernel(kernel, callables_table)
-    # print(kernel.id_to_insn['form_insn_14_icoltile_matvec1_form_i_inner_init'].within_inames)
-    # import pudb; pu.db
-    # 1./0
+    from loopy.preprocess import realize_reduction_for_single_kernel
+    kernel = realize_reduction_for_single_kernel(kernel, callables_table)
+    kernel = loopy.add_dependency(kernel,
+            "id:form_insn_14_icoltile_matvec1_form_i_inner_update",
+            "id:form_insn_15_icoltile_matvec1_form_i_inner_init")
+    kernel = loopy.add_dependency(kernel,
+            "id:form_insn_15_icoltile_matvec1_form_i_inner_update",
+            "id:form_insn_14_icoltile_matvec1_form_i_inner_init")
+    kernel = loopy.add_dependency(kernel,
+            "id:red_assign_form_insn_14",
+            "id:form_insn_15_icoltile_matvec1_form_i_inner_update")
+    kernel = loopy.add_dependency(kernel,
+            "id:red_assign_form_insn_15",
+            "id:form_insn_14_icoltile_matvec1_form_i_inner_update")
+    print(kernel)
+    1/0
 
     return kernel, args_to_make_global
 
