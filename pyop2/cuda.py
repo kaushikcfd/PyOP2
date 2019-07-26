@@ -514,6 +514,22 @@ def generate_single_cell_wrapper(iterset, args, forward_args=(), kernel_name=Non
     return code.device_code()
 
 
+def _make_tv_array_arg(tv):
+    assert tv.address_space != loopy.AddressSpace.PRIVATE
+    arg = loopy.ArrayArg(
+            name=tv.name,
+            dtype=tv.dtype,
+            shape=tv.shape,
+            dim_tags=tv.dim_tags,
+            offset=tv.offset,
+            dim_names=tv.dim_names,
+            order=tv.order,
+            alignment=tv.alignment,
+            address_space=tv.address_space,
+            is_output_only=not tv.read_only)
+    return arg
+
+
 def transform(kernel, callables_table, ncells_per_block=32,
         nthreads_per_cell=1,
         matvec1_parallelize_across='row', matvec2_parallelize_across='row',
@@ -625,7 +641,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     new_temps = dict((tv.name, tv) for tv in old_temps.values() if tv.initializer is None)
     kernel = kernel.copy(
-            args=kernel.args+[tv.copy(initializer=None) for tv in old_temps.values() if tv.initializer is not None],
+            args=kernel.args+[_make_tv_array_arg(tv) for tv in old_temps.values() if tv.initializer is not None],
             temporary_variables=new_temps)
 
     # }}}
@@ -901,8 +917,25 @@ def transform(kernel, callables_table, ncells_per_block=32,
     kernel = loopy.add_dependency(kernel,
             "id:red_assign_form_insn_15",
             "id:form_insn_14_icoltile_matvec1_form_i_inner_update")
-    print(kernel)
-    1/0
+    kernel = loopy.privatize_temporaries_with_inames(kernel,
+            'form_ip_quad_inner_outer',
+            only_var_names=['acc_icoltile_matvec1_form_i_inner',
+                'acc_icoltile_matvec1_form_i_inner_0', 'form_t16', 'form_t17'])
+    kernel = loopy.privatize_temporaries_with_inames(kernel, 'form_j_inner_outer',
+            only_var_names=['acc_icoltile_matvec2_form_ip_basis_inner'])
+    kernel = loopy.duplicate_inames(kernel, ['form_ip_quad_inner_outer', ],
+            within='tag:quad_wrap_up or'
+            ' id:red_assign_form_insn_14 or id:red_assign_form_insn_15')
+    kernel = loopy.duplicate_inames(kernel, ['form_j_inner_outer'], within='tag:scatter or'
+            ' id:red_assign_form_insn_21')
+
+    kernel = loopy.duplicate_inames(kernel,
+            ['form_ip_quad_inner_outer'],
+            'id:form_insn_14_icoltile_matvec1_form_i_inner_init or id:form_insn_15_icoltile_matvec1_form_i_inner_init')
+
+    kernel = loopy.duplicate_inames(kernel,
+            ['form_j_inner_outer'],
+            'id:form_insn_21_icoltile_matvec2_form_ip_basis_inner_init')
 
     return kernel, args_to_make_global
 
