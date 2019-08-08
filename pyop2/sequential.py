@@ -60,6 +60,7 @@ from pyop2.profiling import timed_region
 from pyop2.utils import cached_property, get_petsc_dir
 
 import loopy
+from loopy.preprocess import realize_reduction_for_single_kernel
 
 
 class JITModule(base.JITModule):
@@ -447,19 +448,11 @@ def transform(kernel, callables_table, ncells_per_block=32,
     kernel = loopy.split_iname(kernel, quad_iname_in_quad_redn, matvec1_row_tile_length, outer_iname='irowtile_matvec1')
     kernel = loopy.split_iname(kernel, basis_iname_in_quad_redn, matvec1_col_tile_length, outer_iname='icoltile_matvec1')
 
-    if matvec1_parallelize_across == 'row':
-        kernel = loopy.split_iname(kernel, quad_iname_in_quad_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
-    else:
-        raise NotImplementedError()
-
     # Splitting for tiles in matvec2
     kernel = loopy.split_iname(kernel, basis_iname_in_basis_redn, matvec2_row_tile_length, outer_iname='irowtile_matvec2')
     kernel = loopy.split_iname(kernel, quad_iname_in_basis_redn, matvec2_col_tile_length, outer_iname='icoltile_matvec2')
 
-    if matvec2_parallelize_across == 'row':
-        kernel = loopy.split_iname(kernel, basis_iname_in_basis_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
-    else:
-        raise NotImplementedError()
+    # {{{ Prefetch wizardry
 
     if prefetch_tiles:
         from loopy.transform.data import add_prefetch_for_single_kernel
@@ -475,13 +468,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
         quad_const_matrices = const_matrices_names & frozenset().union(*[insn.read_dependency_names() for insn in
             kernel.instructions if 'quad_redn' in insn.tags])
-        if matvec1_parallelize_across == 'row':
-            sweep_inames = (quad_iname_in_quad_redn+'_inner_outer',
-                    quad_iname_in_quad_redn+'_inner_inner',
-                    basis_iname_in_quad_redn+'_inner')
-            fetch_outer_inames = 'iblock,icoltile_matvec1,irowtile_matvec1'
-        else:
-            raise NotImplementedError()
+        sweep_inames = (quad_iname_in_quad_redn+'_inner',
+                basis_iname_in_quad_redn+'_inner')
+        fetch_outer_inames = 'iblock,icoltile_matvec1,irowtile_matvec1'
 
         quad_prefetch_insns = []
 
@@ -507,11 +496,8 @@ def transform(kernel, callables_table, ncells_per_block=32,
         # coalesced accesses Otherwise we should join the following inames and
         # then split into nthreads_per_cell
 
-        if matvec1_parallelize_across == 'row':
-            kernel = loopy.split_iname(kernel, prefetch_inames[1], nthreads_per_cell)
-            kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1", prefetch_inames[1]+"_inner": "l.0"})
-        else:
-            raise NotImplementedError()
+        kernel = loopy.split_iname(kernel, prefetch_inames[1], nthreads_per_cell)
+        kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1", prefetch_inames[1]+"_inner": "l.0"})
 
         # }}}
 
@@ -521,13 +507,10 @@ def transform(kernel, callables_table, ncells_per_block=32,
             kernel.instructions if 'basis_redn' in insn.tags])
         basis_temp_names = [vng('basis_cnst_mtrix_prftch') for _ in basis_const_matrices]
 
-        if matvec2_parallelize_across == 'row':
-            sweep_inames = (basis_iname_in_basis_redn+'_inner_outer',
-                    basis_iname_in_basis_redn+'_inner_inner',
-                    quad_iname_in_basis_redn+'_inner')
-            fetch_outer_inames = 'iblock,icoltile_matvec2,irowtile_matvec2'
-        else:
-            raise NotImplementedError()
+        sweep_inames = (basis_iname_in_basis_redn+'_inner',
+                basis_iname_in_basis_redn+'_inner',
+                quad_iname_in_basis_redn+'_inner')
+        fetch_outer_inames = 'iblock,icoltile_matvec2,irowtile_matvec2'
 
         basis_prefetch_insns = []
         prefetch_inames = [vng("iprftch") for _ in range(2)]
@@ -545,11 +528,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     default_tag=None,
                     within="tag:basis_redn")
 
-        if matvec2_parallelize_across == 'row':
-            kernel = loopy.split_iname(kernel, prefetch_inames[1], nthreads_per_cell)
-            kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1", prefetch_inames[1]+"_inner": "l.0"})
-        else:
-            raise NotImplementedError()
+        # See FIXME for the quad part at this point
+        kernel = loopy.split_iname(kernel, prefetch_inames[1], nthreads_per_cell)
+        kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1", prefetch_inames[1]+"_inner": "l.0"})
 
         # }}}
 
@@ -600,18 +581,6 @@ def transform(kernel, callables_table, ncells_per_block=32,
             else:
                 kernel = absorb_temporary_into(kernel, quad_temp_name, basis_temp_name)
 
-        if matvec1_parallelize_across == 'row':
-            pass
-            # kernel = loopy.duplicate_inames(kernel, 'icoltile_matvec1', within='id:quad_prftch_insn*')
-        else:
-            raise NotImplementedError()
-
-        if matvec2_parallelize_across == 'row':
-            pass
-            # kernel = loopy.duplicate_inames(kernel, 'icoltile_matvec2', within='id:basis_prftch_insn*')
-        else:
-            raise NotImplementedError()
-
         kernel = loopy.add_dependency(kernel, 'tag:quad_redn', 'id:quad_prftch_insn*')
         kernel = loopy.add_dependency(kernel, 'tag:basis_redn', 'id:basis_prftch_insn*')
 
@@ -622,9 +591,31 @@ def transform(kernel, callables_table, ncells_per_block=32,
         kernel = loopy.remove_dependency(kernel, 'tag:basis_redn', 'tag:basis_redn')
         kernel = loopy.add_dependency(kernel, 'tag:quad_wrap_up', 'tag:quad_redn')
 
+    # }}}
+
+    # {{{ Dividing matvec1-tile's work across threads.
+
+    if matvec1_parallelize_across == 'row':
+        kernel = loopy.split_iname(kernel, quad_iname_in_quad_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
+    else:
+        kernel = loopy.split_iname(kernel, basis_iname_in_quad_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
+        kernel = realize_reduction_for_single_kernel(kernel, callables_table)
+
+    # }}}
+
+    # {{{ diving matvec2-tile's work across threads
+
+    if matvec2_parallelize_across == 'row':
+        kernel = loopy.split_iname(kernel, basis_iname_in_basis_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
+    else:
+        kernel = loopy.split_iname(kernel, quad_iname_in_basis_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
+        kernel = realize_reduction_for_single_kernel(kernel, callables_table)
+
+    # }}}
+
     kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
 
-    # {{{ mico-optimizations
+    # {{{ mico-optimizations(None implemented yet)
 
     #FIXME: Need to set the variables 'remove_func_eval_arrays' depending on
     # the input parameters to 'transform'
@@ -652,9 +643,11 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     # }}}
 
+    print(kernel)
+    1/0
+
     #FIXME: Need to fix the shape of t0 to whatever portion we are editing.
     # the address space of t0 depends on the parallelization strategy.
-    from loopy.preprocess import realize_reduction_for_single_kernel
     kernel = realize_reduction_for_single_kernel(kernel, callables_table)
     kernel = loopy.add_dependency(kernel,
             "id:form_insn_14_icoltile_matvec1_form_i_inner_update",
@@ -771,3 +764,5 @@ def generate_cuda_kernel(program, extruded=False):
         #     f.write(code)
 
     return code
+
+# vim:fdm=marker
