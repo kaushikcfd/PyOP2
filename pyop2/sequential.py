@@ -267,6 +267,20 @@ def transform(kernel, callables_table, ncells_per_block=32,
         load_input_to_shared=False,
         prefetch_tiles=True):
 
+    # {{{ FIXME: Setting names which should be set by TSFC
+
+    quad_iname = 'form_ip'
+    output_basis_coeff_temp = 't2'
+    input_basis_coeff_temp = 't0'
+    scatter_iname = 'i4'
+    basis_iname_in_basis_redn = 'form_j'
+    quad_iname_in_basis_redn = 'form_ip_basis'
+    quad_iname_in_quad_redn = 'form_ip_quad'
+    basis_iname_in_quad_redn = 'form_i'
+    basis_iname_basis_redn = 'form_j'
+
+    # }}}
+
     # {{{ sanity checks
 
     #FIXME: Let's keep on writing this code and visit this later, surely
@@ -375,7 +389,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # }}}
 
     #FIXME: Assumes the variable associated with output is 't0'. GENERALIZE THIS!
-    kernel = loopy.remove_instructions(kernel, "writes:t0 and tag:gather")
+    kernel = loopy.remove_instructions(kernel, "writes:{} and tag:gather".format(output_basis_coeff_temp))
     kernel = loopy.remove_instructions(kernel, "tag:quad_init")
 
     from loopy.transform.convert_to_reduction import convert_to_reduction
@@ -400,22 +414,27 @@ def transform(kernel, callables_table, ncells_per_block=32,
     kernel = loopy.split_iname(kernel, "n", ncells_per_block*nthreads_per_cell,
             outer_iname="iblock", inner_iname="icell")
     #FIXME: Do not use hard-coded inames, this change should also be in TSFC.
-    kernel = loopy.rename_iname(kernel, "i8", "form_j", True)
+    kernel = loopy.rename_iname(kernel, scatter_iname,
+            basis_iname_in_basis_redn, True)
 
     # Duplicate inames to separate transformation logic for quadrature and basis part
-    kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:quadrature", "form_ip_quad")
-    kernel = loopy.duplicate_inames(kernel, "form_ip", "tag:basis", "form_ip_basis")
+    kernel = loopy.duplicate_inames(kernel, quad_iname, "tag:quadrature",
+            quad_iname_in_quad_redn)
+    kernel = loopy.duplicate_inames(kernel, quad_iname, "tag:basis",
+            quad_iname_in_basis_redn)
 
     if load_coordinates_to_shared:
         #FIXME: Assumes uses the name 't1' for coordinates
-        kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell', ['t1'])
-        kernel = loopy.assignment_to_subst(kernel, 't1')
+        kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell',
+                [coords_temp])
+        kernel = loopy.assignment_to_subst(kernel, coords_temp)
         raise NotImplementedError()
 
     if load_input_to_shared:
         #FIXME: Assumes uses the name 't2' for the input basis coeffs
-        kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell', ['t2'])
-        kernel = loopy.assignment_to_subst(kernel, 't2')
+        kernel = loopy.privatize_temporaries_with_inames(kernel, 'icell',
+                [input_basis_coeff_temp])
+        kernel = loopy.assignment_to_subst(kernel, input_basis_coeff_temp)
         raise NotImplementedError()
 
     # compute tile lengths
@@ -425,20 +444,20 @@ def transform(kernel, callables_table, ncells_per_block=32,
     matvec2_col_tile_length = math.ceil(nquad // matvec2_coltiles)
 
     # Splitting for tiles in matvec1
-    kernel = loopy.split_iname(kernel, 'form_ip_quad', matvec1_row_tile_length, outer_iname='irowtile_matvec1')
-    kernel = loopy.split_iname(kernel, 'form_i', matvec1_col_tile_length, outer_iname='icoltile_matvec1')
+    kernel = loopy.split_iname(kernel, quad_iname_in_quad_redn, matvec1_row_tile_length, outer_iname='irowtile_matvec1')
+    kernel = loopy.split_iname(kernel, basis_iname_in_quad_redn, matvec1_col_tile_length, outer_iname='icoltile_matvec1')
 
     if matvec1_parallelize_across == 'row':
-        kernel = loopy.split_iname(kernel, 'form_ip_quad_inner', nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.split_iname(kernel, quad_iname_in_quad_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
     else:
         raise NotImplementedError()
 
     # Splitting for tiles in matvec2
-    kernel = loopy.split_iname(kernel, 'form_j', matvec2_row_tile_length, outer_iname='irowtile_matvec2')
-    kernel = loopy.split_iname(kernel, 'form_ip_basis', matvec2_col_tile_length, outer_iname='icoltile_matvec2')
+    kernel = loopy.split_iname(kernel, basis_iname_in_basis_redn, matvec2_row_tile_length, outer_iname='irowtile_matvec2')
+    kernel = loopy.split_iname(kernel, quad_iname_in_basis_redn, matvec2_col_tile_length, outer_iname='icoltile_matvec2')
 
     if matvec2_parallelize_across == 'row':
-        kernel = loopy.split_iname(kernel, 'form_j_inner', nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.split_iname(kernel, basis_iname_in_basis_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
     else:
         raise NotImplementedError()
 
@@ -457,7 +476,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
         quad_const_matrices = const_matrices_names & frozenset().union(*[insn.read_dependency_names() for insn in
             kernel.instructions if 'quad_redn' in insn.tags])
         if matvec1_parallelize_across == 'row':
-            sweep_inames = ('form_ip_quad_inner_outer', 'form_ip_quad_inner_inner', 'form_i_inner')
+            sweep_inames = (quad_iname_in_quad_redn+'_inner_outer',
+                    quad_iname_in_quad_redn+'_inner_inner',
+                    basis_iname_in_quad_redn+'_inner')
             fetch_outer_inames = 'iblock,icoltile_matvec1,irowtile_matvec1'
         else:
             raise NotImplementedError()
@@ -501,7 +522,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
         basis_temp_names = [vng('basis_cnst_mtrix_prftch') for _ in basis_const_matrices]
 
         if matvec2_parallelize_across == 'row':
-            sweep_inames = ('form_j_inner_outer', 'form_j_inner_inner', 'form_ip_basis_inner')
+            sweep_inames = (basis_iname_in_basis_redn+'_inner_outer',
+                    basis_iname_in_basis_redn+'_inner_inner',
+                    quad_iname_in_basis_redn+'_inner')
             fetch_outer_inames = 'iblock,icoltile_matvec2,irowtile_matvec2'
         else:
             raise NotImplementedError()
@@ -543,7 +566,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
             quad_weight_prefetch_insns = []
 
             if matvec1_parallelize_across == 'row':
-                sweep_inames = ('form_ip_quad_inner_outer', 'form_ip_quad_inner_inner',)
+                sweep_inames = (quad_iname_in_quad_redn+'_inner_outer', quad_iname_in_quad_redn+'_inner_inner',)
                 fetch_outer_inames = 'irowtile_matvec1, icell, iblock'
             else:
                 raise NotImplementedError()
