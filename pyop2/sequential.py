@@ -598,7 +598,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
         kernel = loopy.split_iname(kernel, quad_iname_in_quad_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
     else:
         kernel = loopy.split_iname(kernel, basis_iname_in_quad_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.split_reduction_inward(kernel, basis_iname_in_quad_redn+'_inner_inner')
         kernel = realize_reduction_for_single_kernel(kernel, callables_table)
+        1/0
 
     # }}}
 
@@ -608,6 +610,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
         kernel = loopy.split_iname(kernel, basis_iname_in_basis_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
     else:
         kernel = loopy.split_iname(kernel, quad_iname_in_basis_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.split_reduction_inward(kernel, quad_iname_in_basis_redn+'_inner_inner')
         kernel = realize_reduction_for_single_kernel(kernel, callables_table)
 
     # }}}
@@ -641,6 +644,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # matrices into the constant memory for broadcasting purposes.
 
     # }}}
+
+    print(kernel)
+    1/0
 
     #FIXME: Need to fix the shape of t0 to whatever portion we are editing.
     # the address space of t0 depends on the parallelization strategy.
@@ -718,7 +724,8 @@ def generate_cuda_kernel(program, extruded=False):
 
         # choose the preferred algorithm here
         kernel, args_to_make_global = transform(kernel, program.callables_table,
-                matvec1_parallelize_across='row',
+                nthreads_per_cell=3,
+                matvec1_parallelize_across='column',
                 matvec2_parallelize_across='row',
                 matvec1_rowtiles=1, matvec1_coltiles=2,
                 matvec2_rowtiles=2, matvec2_coltiles=1,
