@@ -508,7 +508,6 @@ def transform(kernel, callables_table, ncells_per_block=32,
         basis_temp_names = [vng('basis_cnst_mtrix_prftch') for _ in basis_const_matrices]
 
         sweep_inames = (basis_iname_in_basis_redn+'_inner',
-                basis_iname_in_basis_redn+'_inner',
                 quad_iname_in_basis_redn+'_inner')
         fetch_outer_inames = 'iblock,icoltile_matvec2,irowtile_matvec2'
 
@@ -642,9 +641,6 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # matrices into the constant memory for broadcasting purposes.
 
     # }}}
-
-    print(kernel)
-    1/0
 
     #FIXME: Need to fix the shape of t0 to whatever portion we are editing.
     # the address space of t0 depends on the parallelization strategy.
