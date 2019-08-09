@@ -646,6 +646,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
     kernel = realize_reduction_for_single_kernel(kernel, callables_table)
 
     if matvec1_parallelize_across == 'row':
+
+        # {{{ gynmastics because of simul_reduces
+
         kernel = loopy.add_dependency(kernel,
                 "id:form_insn_14_icoltile_matvec1_form_i_inner_update",
                 "id:form_insn_15_icoltile_matvec1_form_i_inner_init")
@@ -658,6 +661,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
         kernel = loopy.add_dependency(kernel,
                 "id:red_assign_form_insn_15",
                 "id:form_insn_14_icoltile_matvec1_form_i_inner_update")
+
+        # }}}
+
         kernel = loopy.privatize_temporaries_with_inames(kernel,
                 'form_ip_quad_inner_outer',
                 only_var_names=['acc_icoltile_matvec1_form_i_inner',
@@ -683,7 +689,8 @@ def transform(kernel, callables_table, ncells_per_block=32,
         kernel = save_temporaries_in_loop(kernel, 'form_ip_quad_inner', [
             'acc_icoltile_matvec1', 'acc_icoltile_matvec1_0',
             'acc_form_i_inner_inner_0', 'acc_form_i_inner_inner',
-            'acc_form_i_inner_outer', 'acc_form_i_inner_outer_0', ])
+            'acc_form_i_inner_outer', 'acc_form_i_inner_outer_0', ],
+            within="iname:form_ip_quad_inner")
 
         reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
                 if 'quad_redn' in insn.tags)
@@ -697,8 +704,6 @@ def transform(kernel, callables_table, ncells_per_block=32,
         "id:red_init_form_i_inner_inner_form_insn_15_icoltile_matvec1_update",
         "id:form_insn_14_icoltile_matvec1_init")
 
-        kernel = loopy.assignment_to_subst(kernel, "form_t16")
-        kernel = loopy.assignment_to_subst(kernel, "form_t17")
         kernel = loopy.assignment_to_subst(kernel, "form_t18")
         kernel = loopy.assignment_to_subst(kernel, "form_t19")
         kernel = loopy.assignment_to_subst(kernel, "form_t20")
@@ -717,9 +722,11 @@ def transform(kernel, callables_table, ncells_per_block=32,
                 "id:red_assign_red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update",
                 "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_update")
         kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_init_* or id:red_init_neutral_* or id:red_transfer_*")
-        kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_assign_red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update")
         kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_assign_red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update")
         kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_assign_red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update")
+
+        # FIXME: This assumes that we have only 2 stages.
+        # This is very specific.
 
         kernel = loopy.add_dependency(kernel,
                 "id:red_assign_form_insn_14_icoltile_matvec1_update",
@@ -732,18 +739,11 @@ def transform(kernel, callables_table, ncells_per_block=32,
             within = loopy.match.parse_match("id:red_stage_%d_*" % i)
             assert any(within(kernel, insn) for insn in kernel.instructions)
             kernel = loopy.add_dependency(kernel, "id:red_stage_%d_*" % i, "id:red_stage_%d_*" % (i-1))
-            print(75*'=')
-            print('Whoopie')
-            print(75*'=')
 
-        print(kernel)
-        1/0
+        # This still wouldn't be  schedulable. Need to duplicate some inames.
 
         for assignee in reduction_assignees:
             kernel = loopy.assignment_to_subst(kernel, assignee.name)
-
-        print(kernel)
-        1/0
 
     if matvec2_parallelize_across == 'row':
         kernel = loopy.privatize_temporaries_with_inames(kernel, 'form_j_inner_outer',
@@ -757,6 +757,8 @@ def transform(kernel, callables_table, ncells_per_block=32,
         raise NotImplementedError()
 
     kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
+    kernel = loopy.prioritize_loops(kernel, (("irowtile_matvec1", "icoltile_matvec1"),
+        ("irowtile_matvec2", "icoltile_matvec2")))
 
     return kernel, args_to_make_global
 
