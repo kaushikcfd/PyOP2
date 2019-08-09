@@ -592,15 +592,14 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     # }}}
 
-    # {{{ Dividing matvec1-tile's work across threads.
+    # {{{ divide matvec1-tile's work across threads
 
     if matvec1_parallelize_across == 'row':
         kernel = loopy.split_iname(kernel, quad_iname_in_quad_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
     else:
         kernel = loopy.split_iname(kernel, basis_iname_in_quad_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.split_reduction_inward(kernel, basis_iname_in_quad_redn+'_inner_outer')
         kernel = loopy.split_reduction_inward(kernel, basis_iname_in_quad_redn+'_inner_inner')
-        kernel = realize_reduction_for_single_kernel(kernel, callables_table)
-        1/0
 
     # }}}
 
@@ -611,11 +610,8 @@ def transform(kernel, callables_table, ncells_per_block=32,
     else:
         kernel = loopy.split_iname(kernel, quad_iname_in_basis_redn+'_inner', nthreads_per_cell, inner_tag="l.0")
         kernel = loopy.split_reduction_inward(kernel, quad_iname_in_basis_redn+'_inner_inner')
-        kernel = realize_reduction_for_single_kernel(kernel, callables_table)
 
     # }}}
-
-    kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
 
     # {{{ mico-optimizations(None implemented yet)
 
@@ -645,43 +641,122 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
     # }}}
 
-    print(kernel)
-    1/0
-
     #FIXME: Need to fix the shape of t0 to whatever portion we are editing.
     # the address space of t0 depends on the parallelization strategy.
     kernel = realize_reduction_for_single_kernel(kernel, callables_table)
-    kernel = loopy.add_dependency(kernel,
-            "id:form_insn_14_icoltile_matvec1_form_i_inner_update",
-            "id:form_insn_15_icoltile_matvec1_form_i_inner_init")
-    kernel = loopy.add_dependency(kernel,
-            "id:form_insn_15_icoltile_matvec1_form_i_inner_update",
-            "id:form_insn_14_icoltile_matvec1_form_i_inner_init")
-    kernel = loopy.add_dependency(kernel,
-            "id:red_assign_form_insn_14",
-            "id:form_insn_15_icoltile_matvec1_form_i_inner_update")
-    kernel = loopy.add_dependency(kernel,
-            "id:red_assign_form_insn_15",
-            "id:form_insn_14_icoltile_matvec1_form_i_inner_update")
-    kernel = loopy.privatize_temporaries_with_inames(kernel,
-            'form_ip_quad_inner_outer',
-            only_var_names=['acc_icoltile_matvec1_form_i_inner',
-                'acc_icoltile_matvec1_form_i_inner_0', 'form_t16', 'form_t17'])
-    kernel = loopy.privatize_temporaries_with_inames(kernel, 'form_j_inner_outer',
-            only_var_names=['acc_icoltile_matvec2_form_ip_basis_inner'])
-    kernel = loopy.duplicate_inames(kernel, ['form_ip_quad_inner_outer', ],
-            within='tag:quad_wrap_up or'
-            ' id:red_assign_form_insn_14 or id:red_assign_form_insn_15')
-    kernel = loopy.duplicate_inames(kernel, ['form_j_inner_outer'], within='tag:scatter or'
-            ' id:red_assign_form_insn_21')
 
-    kernel = loopy.duplicate_inames(kernel,
-            ['form_ip_quad_inner_outer'],
-            'id:form_insn_14_icoltile_matvec1_form_i_inner_init or id:form_insn_15_icoltile_matvec1_form_i_inner_init')
+    if matvec1_parallelize_across == 'row':
+        kernel = loopy.add_dependency(kernel,
+                "id:form_insn_14_icoltile_matvec1_form_i_inner_update",
+                "id:form_insn_15_icoltile_matvec1_form_i_inner_init")
+        kernel = loopy.add_dependency(kernel,
+                "id:form_insn_15_icoltile_matvec1_form_i_inner_update",
+                "id:form_insn_14_icoltile_matvec1_form_i_inner_init")
+        kernel = loopy.add_dependency(kernel,
+                "id:red_assign_form_insn_14",
+                "id:form_insn_15_icoltile_matvec1_form_i_inner_update")
+        kernel = loopy.add_dependency(kernel,
+                "id:red_assign_form_insn_15",
+                "id:form_insn_14_icoltile_matvec1_form_i_inner_update")
+        kernel = loopy.privatize_temporaries_with_inames(kernel,
+                'form_ip_quad_inner_outer',
+                only_var_names=['acc_icoltile_matvec1_form_i_inner',
+                    'acc_icoltile_matvec1_form_i_inner_0', 'form_t16', 'form_t17'])
+        kernel = loopy.duplicate_inames(kernel, ['form_ip_quad_inner_outer', ],
+                within='tag:quad_wrap_up or'
+                ' id:red_assign_form_insn_14 or id:red_assign_form_insn_15')
 
-    kernel = loopy.duplicate_inames(kernel,
-            ['form_j_inner_outer'],
-            'id:form_insn_21_icoltile_matvec2_form_ip_basis_inner_init')
+        kernel = loopy.duplicate_inames(kernel,
+                ['form_ip_quad_inner_outer'],
+                'id:form_insn_14_icoltile_matvec1_form_i_inner_init or id:form_insn_15_icoltile_matvec1_form_i_inner_init')
+    else:
+
+        # FIXME: These variables should be named using transform addresssing.
+        # FIXME: We are using "red_stage_0*" to address some of the variables,
+        # but these variable names might collide with the others if we
+        # parallelize reductions even across the other matvec.
+        kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_inner_inner')
+        kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_inner_inner_0')
+
+        from loopy.transform.batch import save_temporaries_in_loop
+
+        kernel = save_temporaries_in_loop(kernel, 'form_ip_quad_inner', [
+            'acc_icoltile_matvec1', 'acc_icoltile_matvec1_0',
+            'acc_form_i_inner_inner_0', 'acc_form_i_inner_inner',
+            'acc_form_i_inner_outer', 'acc_form_i_inner_outer_0', ])
+
+        reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
+                if 'quad_redn' in insn.tags)
+
+        kernel = loopy.add_dependency(kernel, "id:red_transfer_*", "id:red_init_*")
+
+        kernel = loopy.add_dependency(kernel,
+        "id:red_init_form_i_inner_inner_form_insn_14_icoltile_matvec1_update",
+        "id:form_insn_15_icoltile_matvec1_init")
+        kernel = loopy.add_dependency(kernel,
+        "id:red_init_form_i_inner_inner_form_insn_15_icoltile_matvec1_update",
+        "id:form_insn_14_icoltile_matvec1_init")
+
+        kernel = loopy.assignment_to_subst(kernel, "form_t16")
+        kernel = loopy.assignment_to_subst(kernel, "form_t17")
+        kernel = loopy.assignment_to_subst(kernel, "form_t18")
+        kernel = loopy.assignment_to_subst(kernel, "form_t19")
+        kernel = loopy.assignment_to_subst(kernel, "form_t20")
+
+        kernel = loopy.add_dependency(kernel,
+                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_update",
+                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_init")
+        kernel = loopy.add_dependency(kernel,
+                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_update",
+                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_init")
+
+        kernel = loopy.add_dependency(kernel,
+                "id:red_assign_red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update",
+                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_update")
+        kernel = loopy.add_dependency(kernel,
+                "id:red_assign_red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update",
+                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_update")
+        kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_init_* or id:red_init_neutral_* or id:red_transfer_*")
+        kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_assign_red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update")
+        kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_assign_red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update")
+        kernel = loopy.add_dependency(kernel, "id:red_stage_0_*", "id:red_assign_red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update")
+
+        kernel = loopy.add_dependency(kernel,
+                "id:red_assign_form_insn_14_icoltile_matvec1_update",
+                "id:red_stage_1_*")
+        kernel = loopy.add_dependency(kernel,
+                "id:red_assign_form_insn_15_icoltile_matvec1_update",
+                "id:red_stage_1_*")
+
+        for i in range(1, int(math.ceil(math.log2(nthreads_per_cell)))):
+            within = loopy.match.parse_match("id:red_stage_%d_*" % i)
+            assert any(within(kernel, insn) for insn in kernel.instructions)
+            kernel = loopy.add_dependency(kernel, "id:red_stage_%d_*" % i, "id:red_stage_%d_*" % (i-1))
+            print(75*'=')
+            print('Whoopie')
+            print(75*'=')
+
+        print(kernel)
+        1/0
+
+        for assignee in reduction_assignees:
+            kernel = loopy.assignment_to_subst(kernel, assignee.name)
+
+        print(kernel)
+        1/0
+
+    if matvec2_parallelize_across == 'row':
+        kernel = loopy.privatize_temporaries_with_inames(kernel, 'form_j_inner_outer',
+                only_var_names=['acc_icoltile_matvec2_form_ip_basis_inner'])
+        kernel = loopy.duplicate_inames(kernel, ['form_j_inner_outer'], within='tag:scatter or'
+                ' id:red_assign_form_insn_21')
+        kernel = loopy.duplicate_inames(kernel,
+                ['form_j_inner_outer'],
+                'id:form_insn_21_icoltile_matvec2_form_ip_basis_inner_init')
+    else:
+        raise NotImplementedError()
+
+    kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
 
     return kernel, args_to_make_global
 
