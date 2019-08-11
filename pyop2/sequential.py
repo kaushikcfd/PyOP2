@@ -61,6 +61,7 @@ from pyop2.utils import cached_property, get_petsc_dir
 
 import loopy
 from loopy.preprocess import realize_reduction_for_single_kernel
+import re
 
 
 class JITModule(base.JITModule):
@@ -692,67 +693,33 @@ def transform(kernel, callables_table, ncells_per_block=32,
         reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
                 if 'quad_redn' in insn.tags)
 
-        kernel = loopy.add_dependency(kernel,
-                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_init or "
-                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_update or "
-                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_init or "
-                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_upate",
-                "id:red_init_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
-                "id:red_init_form_i_inner_inner_form_insn_15_icoltile_matvec1_update")
-
-        kernel = loopy.add_dependency(kernel,
-                "id:red_init_form_i_inner_inner_form_insn_14_icoltile_matvec1_update",
-                "id:form_insn_15_icoltile_matvec1_init")
-        kernel = loopy.add_dependency(kernel,
-                "id:red_init_form_i_inner_inner_form_insn_15_icoltile_matvec1_update",
-                "id:form_insn_14_icoltile_matvec1_init")
+        # Just translate all the dependencies of form_insn_14 to form_insn_15
+        for insn in kernel.instructions:
+            if re.match(".*form_insn_14.*", insn.id):
+                insn_15_eq = re.sub("(.*)form_insn_14(.*)",
+                        "\g<1>form_insn_15\g<2>",
+                        insn.id)
+                new_depends_on = []
+                for depends in insn.depends_on:
+                    if re.match(".*form_insn_14.*", insn.id):
+                        kernel = loopy.add_dependency(kernel,
+                                "id:{}".format(insn_15_eq),
+                                "id:{}".format(depends))
+                        kernel = loopy.add_dependency(kernel,
+                                "id:{}".format(insn.id),
+                                "id:{}".format(re.sub(
+                                    "(.*)form_insn_14(.*)",
+                                    "\g<1>form_insn_15\g<2>",
+                                    depends)))
 
         kernel = loopy.assignment_to_subst(kernel, "form_t18")
         kernel = loopy.assignment_to_subst(kernel, "form_t19")
         kernel = loopy.assignment_to_subst(kernel, "form_t20")
 
-        kernel = loopy.add_dependency(kernel,
-                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_update",
-                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_init")
-        kernel = loopy.add_dependency(kernel,
-                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_update",
-                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_init")
-
-        kernel = loopy.add_dependency(kernel,
-                "id:red_assign_red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update",
-                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_update")
-        kernel = loopy.add_dependency(kernel,
-                "id:red_assign_red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update",
-                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_update")
-
-        kernel = loopy.add_dependency(kernel,
-                "id:red_stage_0_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
-                "id:red_stage_0_form_i_inner_inner_form_insn_15_icoltile_matvec1_update",
-                "id:red_init_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
-                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_init or "
-                "id:red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update_form_i_inner_outer_update or "
-                "id:red_init_form_i_inner_inner_form_insn_15_icoltile_matvec1_update or "
-                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_init or "
-                "id:red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update_form_i_inner_outer_update or "
-                "id:red_assign_red_transfer_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
-                "id:red_assign_red_transfer_form_i_inner_inner_form_insn_15_icoltile_matvec1_update")
-
-        kernel = loopy.add_dependency(kernel,
-                "id:red_assign_form_insn_14_icoltile_matvec1_update or "
-                "id:red_assign_form_insn_15_icoltile_matvec1_update",
-                "id:red_stage_{0}_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
-                "id:red_stage_{0}_form_i_inner_inner_form_insn_15_icoltile_matvec1_update".format(
-                    int(math.ceil(math.log2(nthreads_per_cell)))-1))
-
         kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
                 within="id:red_stage_0_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
                 "id:red_stage_0_form_i_inner_inner_form_insn_15_icoltile_matvec1_update")
         for i in range(1, int(math.ceil(math.log2(nthreads_per_cell)))):
-            kernel = loopy.add_dependency(kernel,
-                    "id:red_stage_{0}_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
-                    "id:red_stage_{0}_form_i_inner_inner_form_insn_15_icoltile_matvec1_update".format(i),
-                    "id:red_stage_{0}_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
-                    "id:red_stage_{0}_form_i_inner_inner_form_insn_15_icoltile_matvec1_update".format(i-1),)
             kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
                     within="id:red_stage_{0}_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
                     "id:red_stage_{0}_form_i_inner_inner_form_insn_15_icoltile_matvec1_update".format(i),)
