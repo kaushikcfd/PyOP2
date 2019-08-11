@@ -646,24 +646,27 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # the address space of t0 depends on the parallelization strategy.
     kernel = realize_reduction_for_single_kernel(kernel, callables_table)
 
+    # Just translate all the dependencies of form_insn_14 to form_insn_15
+    for insn in kernel.instructions:
+        if re.match(".*form_insn_14.*", insn.id):
+            insn_15_eq = re.sub("(.*)form_insn_14(.*)",
+                    "\g<1>form_insn_15\g<2>",
+                    insn.id)
+            new_depends_on = []
+            for depends in insn.depends_on:
+                if re.match(".*form_insn_14.*", insn.id):
+                    kernel = loopy.add_dependency(kernel,
+                            "id:{}".format(insn_15_eq),
+                            "id:{}".format(depends))
+                    kernel = loopy.add_dependency(kernel,
+                            "id:{}".format(insn.id),
+                            "id:{}".format(re.sub(
+                                "(.*)form_insn_14(.*)",
+                                "\g<1>form_insn_15\g<2>",
+                                depends)))
+
+
     if matvec1_parallelize_across == 'row':
-
-        # {{{ gynmastics because of simul_reduces
-
-        kernel = loopy.add_dependency(kernel,
-                "id:form_insn_14_icoltile_matvec1_form_i_inner_update",
-                "id:form_insn_15_icoltile_matvec1_form_i_inner_init")
-        kernel = loopy.add_dependency(kernel,
-                "id:form_insn_15_icoltile_matvec1_form_i_inner_update",
-                "id:form_insn_14_icoltile_matvec1_form_i_inner_init")
-        kernel = loopy.add_dependency(kernel,
-                "id:red_assign_form_insn_14",
-                "id:form_insn_15_icoltile_matvec1_form_i_inner_update")
-        kernel = loopy.add_dependency(kernel,
-                "id:red_assign_form_insn_15",
-                "id:form_insn_14_icoltile_matvec1_form_i_inner_update")
-
-        # }}}
 
         kernel = loopy.privatize_temporaries_with_inames(kernel,
                 'form_ip_quad_inner_outer',
@@ -678,10 +681,6 @@ def transform(kernel, callables_table, ncells_per_block=32,
                 'id:form_insn_14_icoltile_matvec1_form_i_inner_init or id:form_insn_15_icoltile_matvec1_form_i_inner_init')
     else:
 
-        # FIXME: These variables should be named using transform addresssing.
-        kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_inner_inner')
-        kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_inner_inner_0')
-
         from loopy.transform.batch import save_temporaries_in_loop
 
         kernel = save_temporaries_in_loop(kernel, 'form_ip_quad_inner', [
@@ -693,28 +692,18 @@ def transform(kernel, callables_table, ncells_per_block=32,
         reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
                 if 'quad_redn' in insn.tags)
 
-        # Just translate all the dependencies of form_insn_14 to form_insn_15
-        for insn in kernel.instructions:
-            if re.match(".*form_insn_14.*", insn.id):
-                insn_15_eq = re.sub("(.*)form_insn_14(.*)",
-                        "\g<1>form_insn_15\g<2>",
-                        insn.id)
-                new_depends_on = []
-                for depends in insn.depends_on:
-                    if re.match(".*form_insn_14.*", insn.id):
-                        kernel = loopy.add_dependency(kernel,
-                                "id:{}".format(insn_15_eq),
-                                "id:{}".format(depends))
-                        kernel = loopy.add_dependency(kernel,
-                                "id:{}".format(insn.id),
-                                "id:{}".format(re.sub(
-                                    "(.*)form_insn_14(.*)",
-                                    "\g<1>form_insn_15\g<2>",
-                                    depends)))
+        # FIXME: These variables should be named using transform addresssing.
+        kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_inner_inner')
+        kernel = loopy.assignment_to_subst(kernel, 'neutral_form_i_inner_inner_0')
 
         kernel = loopy.assignment_to_subst(kernel, "form_t18")
         kernel = loopy.assignment_to_subst(kernel, "form_t19")
         kernel = loopy.assignment_to_subst(kernel, "form_t20")
+
+        for assignee in reduction_assignees:
+            kernel = loopy.assignment_to_subst(kernel, assignee.name)
+
+        # {{{ duplicate form_ip_quad_inner in a bunch of equations
 
         kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
                 within="id:red_stage_0_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
@@ -724,36 +713,26 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     within="id:red_stage_{0}_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
                     "id:red_stage_{0}_form_i_inner_inner_form_insn_15_icoltile_matvec1_update".format(i),)
 
-        for assignee in reduction_assignees:
-            kernel = loopy.assignment_to_subst(kernel, assignee.name)
-
         kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
                 within="id:form_insn_14_icoltile_matvec1_init or id:form_insn_15_icoltile_matvec1_init")
         kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
                 within="id:red_assign_form_insn_14_icoltile_matvec1_update or id:red_assign_form_insn_15_icoltile_matvec1_update")
         kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner", within="tag:quad_wrap_up")
+        # }}}
+
+        # {{{ adding l.0 hw axes to some axes.
 
         kernel = loopy.add_inames_to_insn(kernel,
                 inames="red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
                 insn_match="id:form_insn_14_icoltile_matvec1_init")
-        kernel = loopy.duplicate_inames(kernel,
-                "red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
-                within="id:form_insn_14_icoltile_matvec1_init",
-                tags={'red_form_i_inner_inner_s{0}_1'.format(int(math.ceil(math.log2(nthreads_per_cell)))-1): 'l.0'})
         kernel = loopy.add_inames_to_insn(kernel,
                 inames="red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
                 insn_match="id:form_insn_15_icoltile_matvec1_init")
-        kernel = loopy.duplicate_inames(kernel,
-                "red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
-                within="id:form_insn_15_icoltile_matvec1_init",
-                tags={'red_form_i_inner_inner_s{0}_1'.format(int(math.ceil(math.log2(nthreads_per_cell)))-1): 'l.0'})
         kernel = loopy.add_inames_to_insn(kernel,
                 inames="red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
                 insn_match="tag:quad_wrap_up")
-        kernel = loopy.duplicate_inames(kernel,
-                "red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
-                within="tag:quad_wrap_up",
-                tags={'red_form_i_inner_inner_s{0}_1'.format(int(math.ceil(math.log2(nthreads_per_cell)))-1): 'l.0'})
+
+        # }}}
 
     if matvec2_parallelize_across == 'row':
         kernel = loopy.privatize_temporaries_with_inames(kernel, 'form_j_inner_outer',
