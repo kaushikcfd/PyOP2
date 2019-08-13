@@ -413,7 +413,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
     # }}}
 
     # Realize CUDA blocks
-    kernel = loopy.split_iname(kernel, "n", ncells_per_block*nthreads_per_cell,
+    kernel = loopy.split_iname(kernel, "n", ncells_per_block,
             outer_iname="iblock", inner_iname="icell")
     #FIXME: Do not use hard-coded inames, this change should also be in TSFC.
     kernel = loopy.rename_iname(kernel, scatter_iname,
@@ -497,8 +497,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
         # coalesced accesses Otherwise we should join the following inames and
         # then split into nthreads_per_cell
 
-        kernel = loopy.split_iname(kernel, prefetch_inames[1], nthreads_per_cell)
-        kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1", prefetch_inames[1]+"_inner": "l.0"})
+        kernel = loopy.split_iname(kernel, prefetch_inames[1],
+                nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1"})
 
         # }}}
 
@@ -529,8 +530,9 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     within="tag:basis_redn")
 
         # See FIXME for the quad part at this point
-        kernel = loopy.split_iname(kernel, prefetch_inames[1], nthreads_per_cell)
-        kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1", prefetch_inames[1]+"_inner": "l.0"})
+        kernel = loopy.split_iname(kernel, prefetch_inames[1],
+                nthreads_per_cell, inner_tag="l.0")
+        kernel = loopy.tag_inames(kernel, {prefetch_inames[0]: "l.1"})
 
         # }}}
 
@@ -686,8 +688,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
         kernel = save_temporaries_in_loop(kernel, 'form_ip_quad_inner', [
             'acc_icoltile_matvec1', 'acc_icoltile_matvec1_0',
-            'acc_form_i_inner_inner_0', 'acc_form_i_inner_inner',
-            'acc_form_i_inner_outer', 'acc_form_i_inner_outer_0', ],
+            'acc_form_i_inner_inner_0', 'acc_form_i_inner_inner',],
             within="iname:form_ip_quad_inner")
 
         reduction_assignees = tuple(insn.assignee for insn in kernel.instructions
@@ -756,7 +757,7 @@ def transform(kernel, callables_table, ncells_per_block=32,
             kernel = loopy.duplicate_inames(kernel,
                     "form_j_inner",
                     "id:red_stage_{0}_form_ip_basis_inner_inner_form_insn_21_icoltile_matvec2_update".format(i))
-        
+
         kernel = loopy.duplicate_inames(kernel,
                 "form_j_inner",
                 within="id:form_insn_21_icoltile_matvec2_init")
@@ -824,8 +825,8 @@ def generate_cuda_kernel(program, extruded=False):
         # choose the preferred algorithm here
         kernel, args_to_make_global = transform(kernel, program.callables_table,
                 nthreads_per_cell=3,
-                matvec1_parallelize_across='row',
-                matvec2_parallelize_across='column',
+                matvec1_parallelize_across='column',
+                matvec2_parallelize_across='row',
                 matvec1_rowtiles=1, matvec1_coltiles=2,
                 matvec2_rowtiles=2, matvec2_coltiles=1,
                 prefetch_tiles=True,)
