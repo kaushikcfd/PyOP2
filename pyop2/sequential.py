@@ -684,6 +684,16 @@ def transform(kernel, callables_table, ncells_per_block=32,
                 'id:form_insn_14_icoltile_matvec1_form_i_inner_init or id:form_insn_15_icoltile_matvec1_form_i_inner_init')
     else:
 
+        # {{{ make acc_icoltile => local vars
+
+        new_temps = dict((name, tv.copy(address_space=loopy.AddressSpace.LOCAL))
+                if name in ['acc_icoltile_matvec1', 'acc_icoltile_matvec1_0']
+                else (name, tv) for name, tv in
+                kernel.temporary_variables.items())
+        kernel = kernel.copy(temporary_variables=new_temps)
+
+        # }}}
+
         from loopy.transform.batch import save_temporaries_in_loop
 
         kernel = save_temporaries_in_loop(kernel, 'form_ip_quad_inner', [
@@ -712,24 +722,24 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     within="id:red_stage_{0}_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
                     "id:red_stage_{0}_form_i_inner_inner_form_insn_15_icoltile_matvec1_update".format(i),)
 
-        kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
-                within="id:form_insn_14_icoltile_matvec1_init or id:form_insn_15_icoltile_matvec1_init")
+
         kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
                 within="id:red_assign_form_insn_14_icoltile_matvec1_update or id:red_assign_form_insn_15_icoltile_matvec1_update")
-        kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner", within="tag:quad_wrap_up")
-        # }}}
 
-        # {{{ adding l.0 hw axes to some axes.
 
-        kernel = loopy.add_inames_to_insn(kernel,
-                inames="red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
-                insn_match="id:form_insn_14_icoltile_matvec1_init")
-        kernel = loopy.add_inames_to_insn(kernel,
-                inames="red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
-                insn_match="id:form_insn_15_icoltile_matvec1_init")
-        kernel = loopy.add_inames_to_insn(kernel,
-                inames="red_form_i_inner_inner_s{0}_1".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
-                insn_match="tag:quad_wrap_up")
+        kernel = loopy.duplicate_inames(kernel, ["form_ip_quad_inner"],
+                new_inames=["form_ip_quad_inner_icoltile_matvec1"],
+                within="id:form_insn_14_icoltile_matvec1_init or id:form_insn_15_icoltile_matvec1_init")
+        kernel = loopy.split_iname(kernel, "form_ip_quad_inner_icoltile_matvec1",
+                nthreads_per_cell, inner_tag="l.0",
+                within="id:form_insn_14_icoltile_matvec1_init or id:form_insn_15_icoltile_matvec1_init")
+
+        kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
+                new_inames=["form_ip_quad_inner_quad_wrap_up"],
+                within="tag:quad_wrap_up")
+        kernel = loopy.split_iname(kernel, "form_ip_quad_inner_quad_wrap_up",
+                nthreads_per_cell, inner_tag="l.0",
+                within="tag:quad_wrap_up")
 
         # }}}
 
