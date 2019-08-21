@@ -722,10 +722,8 @@ def transform(kernel, callables_table, ncells_per_block=32,
                     within="id:red_stage_{0}_form_i_inner_inner_form_insn_14_icoltile_matvec1_update or "
                     "id:red_stage_{0}_form_i_inner_inner_form_insn_15_icoltile_matvec1_update".format(i),)
 
-
         kernel = loopy.duplicate_inames(kernel, "form_ip_quad_inner",
                 within="id:red_assign_form_insn_14_icoltile_matvec1_update or id:red_assign_form_insn_15_icoltile_matvec1_update")
-
 
         kernel = loopy.duplicate_inames(kernel, ["form_ip_quad_inner"],
                 new_inames=["form_ip_quad_inner_icoltile_matvec1"],
@@ -752,9 +750,19 @@ def transform(kernel, callables_table, ncells_per_block=32,
                 ['form_j_inner_outer'],
                 'id:form_insn_21_icoltile_matvec2_form_ip_basis_inner_init')
     else:
+
+        # {{{ make acc_icoltile => local vars
+
+        new_temps = dict((name, tv.copy(address_space=loopy.AddressSpace.LOCAL))
+                if name in ['acc_icoltile_matvec2', 't2']
+                else (name, tv) for name, tv in
+                kernel.temporary_variables.items())
+        kernel = kernel.copy(temporary_variables=new_temps)
+
+        # }}}
+
         kernel = loopy.assignment_to_subst(kernel, 'neutral_form_ip_basis_inner_inner')
         from loopy.transform.batch import save_temporaries_in_loop
-        # FIXME: Maybe we do not need to privatize "acc_icoltile_matvec2"?
         kernel = loopy.save_temporaries_in_loop(kernel,
                 'form_j_inner',
                 [
@@ -770,28 +778,28 @@ def transform(kernel, callables_table, ncells_per_block=32,
 
         kernel = loopy.duplicate_inames(kernel,
                 "form_j_inner",
-                within="id:form_insn_21_icoltile_matvec2_init")
-
-        kernel = loopy.duplicate_inames(kernel,
-                "form_j_inner",
                 within="id:red_assign_form_insn_21_icoltile_matvec2_update")
 
         kernel = loopy.duplicate_inames(kernel,
                 "form_j_inner",
-                "tag:scatter or id:red_assign_form_insn_21")
+                new_inames=["form_j_inner_icoltile_matvec2_init"],
+                within="id:form_insn_21_icoltile_matvec2_init")
+        kernel = loopy.split_iname(kernel,
+                "form_j_inner_icoltile_matvec2_init", nthreads_per_cell,
+                inner_tag="l.0",
+                within="id:form_insn_21_icoltile_matvec2_init")
 
-        kernel = loopy.add_inames_to_insn(kernel,
-                inames="red_form_ip_basis_inner_inner_s{0}_0".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
-                insn_match="id:form_insn_21_icoltile_matvec2_init")
-
-
-        kernel = loopy.add_inames_to_insn(kernel,
-                inames="red_form_ip_basis_inner_inner_s{0}_0".format(int(math.ceil(math.log2(nthreads_per_cell)))-1),
-                insn_match="id:red_assign_form_insn_21 or tag:scatter")
+        kernel = loopy.duplicate_inames(kernel,
+                "form_j_inner",
+                new_inames="form_j_inner_scatter",
+                within="tag:scatter or id:red_assign_form_insn_21")
+        kernel = loopy.split_iname(kernel,
+                "form_j_inner_scatter",
+                nthreads_per_cell,
+                inner_tag="l.0",
+                within="tag:scatter or id:red_assign_form_insn_21")
 
     kernel = loopy.tag_inames(kernel, "icell:l.1, iblock:g.0")
-    kernel = loopy.prioritize_loops(kernel, ("irowtile_matvec1", "icoltile_matvec1"))
-    kernel = loopy.prioritize_loops(kernel, ("irowtile_matvec2", "icoltile_matvec2"))
 
     return kernel, args_to_make_global
 
@@ -835,8 +843,8 @@ def generate_cuda_kernel(program, extruded=False):
         # choose the preferred algorithm here
         kernel, args_to_make_global = transform(kernel, program.callables_table,
                 nthreads_per_cell=3,
-                matvec1_parallelize_across='column',
-                matvec2_parallelize_across='row',
+                matvec1_parallelize_across='row',
+                matvec2_parallelize_across='column',
                 matvec1_rowtiles=1, matvec1_coltiles=2,
                 matvec2_rowtiles=2, matvec2_coltiles=1,
                 prefetch_tiles=True,)
