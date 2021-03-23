@@ -25,7 +25,6 @@ def snpt_transform(kernel, block_size):
     PyOP2 uses 'n' as the outer loop iname. In Firedrake 'n' might denote
     either a cell or a DOF.
     """
-
     kernel = lp.assume(kernel, "start < end")
     kernel = lp.split_iname(kernel, "n", block_size, outer_tag="g.0", inner_tag="l.0")
 

@@ -494,7 +494,8 @@ class JITModule(base.JITModule):
         key = super(JITModule, cls)._cache_key(*args, **kwargs)
         key += (configuration["gpu_strategy"],)
         if configuration["gpu_strategy"] == "scpt":
-            pass
+            key += (configuration["gpu_cells_per_block"],
+                    configuration["gpu_threads_per_cell"])
         elif configuration["gpu_strategy"] == "user_specified_tile":
             key += (configuration["gpu_cells_per_block"],
                     configuration["gpu_threads_per_cell"],
@@ -514,6 +515,9 @@ class JITModule(base.JITModule):
             # Also this number should not exceed certain number i.e. when the
             # device would be saturated.
             key += (min(int(numpy.log2(problem_size)), 18),)
+        elif configuration["gpu_strategy"] == "dq_transform":
+            key += (configuration["gpu_cells_per_block"],
+                    configuration["gpu_threads_per_cell"])
         else:
             raise NotImplementedError('For strategy: {}'.format(
                 configuration["gpu_strategy"]))
@@ -525,6 +529,7 @@ class JITModule(base.JITModule):
             glens_llens = f.read()
 
         _, glens, llens = glens_llens.split('\n')
+
         from pymbolic import parse, evaluate
         glens = parse(glens)
         llens = parse(llens)
@@ -610,6 +615,7 @@ class JITModule(base.JITModule):
         wrapper = generate(builder, include_petsc=False, include_complex=False)
 
         code, processed_program, args_to_make_global = generate_gpu_kernel(wrapper, self.args, self.argshapes, 'cuda')
+
         for i, arg_to_make_global in enumerate(args_to_make_global):
             numpy.save(self.ith_added_global_arg_i(i),
                        arg_to_make_global)
@@ -752,7 +758,7 @@ class ParLoop(petsc_base.ParLoop):
 
         # how about over here we decide what should the strategy be..
 
-        if configuration["gpu_timer"]:
+        if configuration["gpu_timer"] and self._kernel.name == "form0_cell_integral_otherwise":
             start = cuda.Event()
             end = cuda.Event()
             start.record()

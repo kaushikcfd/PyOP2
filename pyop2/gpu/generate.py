@@ -117,6 +117,10 @@ def generate_gpu_kernel(program, args=None, argshapes=None, target=None):
             from pyop2.gpu.tile import AutoTiler
             kernel, args_to_make_global = AutoTiler(program.with_root_kernel(kernel),
                                                     configuration["gpu_planner_kernel_evals"])(args, argshapes)
+        elif configuration["gpu_strategy"] == "dq_transform":
+            from pyop2.gpu.dq_transform import dq_transform
+            kernel, args_to_make_global = dq_transform(kernel, configuration["gpu_cells_per_block"],
+                                                               configuration["gpu_threads_per_cell"])
         else:
             raise ValueError("gpu_strategy can be 'scpt', 'user_specified_tile' or 'auto_tile'.")
     elif program.name in [
